@@ -1,0 +1,198 @@
+from __future__ import annotations
+
+import json
+import re
+from typing import Any, Optional
+
+from ..db import db
+from . import client
+
+# Manifest definition tables we download and cache locally.
+NEEDED_TABLES = [
+    "DestinyInventoryItemDefinition",
+    "DestinyStatDefinition",
+    "DestinySandboxPerkDefinition",
+    "DestinyDamageTypeDefinition",
+    "DestinyInventoryBucketDefinition",
+    "DestinyPlugSetDefinition",
+    "DestinyItemCategoryDefinition",
+]
+
+# DestinyItemType enum values we care about.
+ITEM_TYPE_ARMOR = 2
+ITEM_TYPE_WEAPON = 3
+ITEM_TYPE_SUBCLASS = 16
+ITEM_TYPE_MOD = 19
+
+
+def _normalize(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
+
+
+async def get_manifest_meta() -> dict:
+    return await client.get("/Destiny2/Manifest/")
+
+
+def stored_version() -> Optional[str]:
+    with db() as conn:
+        row = conn.execute("SELECT version FROM manifest_meta WHERE id = 1").fetchone()
+    return row["version"] if row else None
+
+
+def _classify(item: dict) -> Optional[str]:
+    """Map an InventoryItemDefinition to a build-relevant entity type."""
+    item_type = item.get("itemType", 0)
+    if item_type == ITEM_TYPE_WEAPON:
+        return "weapon"
+    if item_type == ITEM_TYPE_ARMOR:
+        return "armor"
+    if item_type == ITEM_TYPE_SUBCLASS:
+        return "subclass"
+
+    plug = item.get("plug") or {}
+    category = (plug.get("plugCategoryIdentifier") or "").lower()
+    if category:
+        if "aspects" in category:
+            return "aspect"
+        if "fragments" in category:
+            return "fragment"
+        if "mods" in category or item_type == ITEM_TYPE_MOD:
+            return "mod"
+        return "perk"
+
+    if item_type == ITEM_TYPE_MOD:
+        return "mod"
+    return None
+
+
+async def sync_manifest(force: bool = False) -> dict:
+    """Download and cache needed definition tables if the version changed."""
+    meta = await get_manifest_meta()
+    version = meta["version"]
+    if not force and stored_version() == version:
+        return {"status": "up-to-date", "version": version}
+
+    paths = meta["jsonWorldComponentContentPaths"]["en"]
+    with db() as conn:
+        conn.execute("DELETE FROM manifest_defs")
+        conn.execute("DELETE FROM name_index")
+        for table in NEEDED_TABLES:
+            rel = paths.get(table)
+            if not rel:
+                continue
+            content = await client.get_raw(rel)
+            data = json.loads(content)
+            rows = []
+            name_rows = []
+            for hash_str, definition in data.items():
+                try:
+                    h = int(hash_str)
+                except ValueError:
+                    continue
+                rows.append((table, h, json.dumps(definition)))
+                if table == "DestinyInventoryItemDefinition":
+                    name = (definition.get("displayProperties") or {}).get("name") or ""
+                    if not name or definition.get("redacted"):
+                        continue
+                    entity = _classify(definition)
+                    if entity is None:
+                        continue
+                    tier = (definition.get("inventory") or {}).get("tierType", 0)
+                    is_exotic = 1 if tier == 6 else 0
+                    class_type = definition.get("classType", 3)
+                    name_rows.append(
+                        (h, name, _normalize(name), entity, is_exotic, class_type)
+                    )
+            conn.executemany(
+                "INSERT OR REPLACE INTO manifest_defs (table_name, hash, json) VALUES (?, ?, ?)",
+                rows,
+            )
+            if name_rows:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO name_index "
+                    "(hash, name, normalized, entity_type, is_exotic, class_type) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    name_rows,
+                )
+        import time
+
+        conn.execute(
+            "INSERT INTO manifest_meta (id, version, updated_at) VALUES (1, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET version=excluded.version, updated_at=excluded.updated_at",
+            (version, time.time()),
+        )
+    return {"status": "synced", "version": version}
+
+
+def get_definition(table: str, hash_: int) -> Optional[dict]:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT json FROM manifest_defs WHERE table_name = ? AND hash = ?",
+            (table, hash_),
+        ).fetchone()
+    return json.loads(row["json"]) if row else None
+
+
+def get_item(hash_: int) -> Optional[dict]:
+    return get_definition("DestinyInventoryItemDefinition", hash_)
+
+
+def get_definitions(table: str, hashes: list[int]) -> dict[int, dict]:
+    if not hashes:
+        return {}
+    with db() as conn:
+        placeholders = ",".join("?" * len(hashes))
+        rows = conn.execute(
+            f"SELECT hash, json FROM manifest_defs "
+            f"WHERE table_name = ? AND hash IN ({placeholders})",
+            [table, *hashes],
+        ).fetchall()
+    return {row["hash"]: json.loads(row["json"]) for row in rows}
+
+
+def search_names(query: str, entity_types: Optional[list[str]] = None, limit: int = 25) -> list[dict]:
+    norm = _normalize(query)
+    if not norm:
+        return []
+    sql = "SELECT hash, name, entity_type FROM name_index WHERE normalized LIKE ?"
+    args: list[Any] = [f"%{norm}%"]
+    if entity_types:
+        placeholders = ",".join("?" * len(entity_types))
+        sql += f" AND entity_type IN ({placeholders})"
+        args.extend(entity_types)
+    sql += " LIMIT ?"
+    args.append(limit)
+    with db() as conn:
+        rows = conn.execute(sql, args).fetchall()
+    return [dict(r) for r in rows]
+
+
+def name_row(hash_: int) -> Optional[dict]:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT hash, name, entity_type, is_exotic, class_type FROM name_index WHERE hash = ?",
+            (hash_,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def exotic_names() -> list[dict]:
+    """All exotic weapons/armor for query matching."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT hash, name, normalized, entity_type, class_type FROM name_index "
+            "WHERE is_exotic = 1 AND entity_type IN ('weapon', 'armor')"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def all_names(entity_types: Optional[list[str]] = None) -> list[dict]:
+    sql = "SELECT hash, name, normalized, entity_type FROM name_index"
+    args: list[Any] = []
+    if entity_types:
+        placeholders = ",".join("?" * len(entity_types))
+        sql += f" WHERE entity_type IN ({placeholders})"
+        args.extend(entity_types)
+    with db() as conn:
+        rows = conn.execute(sql, args).fetchall()
+    return [dict(r) for r in rows]

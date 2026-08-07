@@ -1,0 +1,59 @@
+from __future__ import annotations
+
+from typing import Any, Optional
+
+import httpx
+
+from ..config import get_settings
+from . import auth
+
+API_ROOT = "https://www.bungie.net/Platform"
+BUNGIE_ROOT = "https://www.bungie.net"
+
+
+class BungieError(Exception):
+    def __init__(self, message: str, status_code: int = 502):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+async def _headers(authed: bool) -> dict[str, str]:
+    settings = get_settings()
+    headers = {"X-API-Key": settings.bungie_api_key}
+    if authed:
+        token = await auth.get_valid_access_token()
+        if not token:
+            raise BungieError("Not authenticated with Bungie.", status_code=401)
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+async def get(path: str, *, params: Optional[dict] = None, authed: bool = False) -> Any:
+    """GET a Platform endpoint and unwrap the standard Bungie response envelope."""
+    url = path if path.startswith("http") else f"{API_ROOT}{path}"
+    headers = await _headers(authed)
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.get(url, headers=headers, params=params)
+    if resp.status_code >= 400:
+        raise BungieError(f"Bungie API error {resp.status_code}: {resp.text[:300]}", resp.status_code)
+    payload = resp.json()
+    if payload.get("ErrorCode", 1) != 1:
+        raise BungieError(
+            f"Bungie API returned {payload.get('ErrorStatus')}: {payload.get('Message')}",
+            502,
+        )
+    return payload.get("Response")
+
+
+async def get_raw(url: str) -> bytes:
+    """Fetch a raw asset (e.g. a manifest content file) from bungie.net."""
+    full = url if url.startswith("http") else f"{BUNGIE_ROOT}{url}"
+    async with httpx.AsyncClient(timeout=180) as client:
+        resp = await client.get(full)
+    if resp.status_code >= 400:
+        raise BungieError(f"Failed to fetch {full}: {resp.status_code}", resp.status_code)
+    return resp.content
+
+
+async def get_current_user_memberships() -> Any:
+    return await get("/User/GetMembershipsForCurrentUser/", authed=True)
