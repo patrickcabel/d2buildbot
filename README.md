@@ -22,6 +22,18 @@ No paid LLM is used. The build engine reads everything from local caches.
 - Node.js 18+
 - A Bungie API application (free).
 
+## Quick start (Windows PowerShell)
+
+After registering your Bungie app (below), you can set up and launch everything with:
+
+```powershell
+./run.ps1            # installs deps (first run) and starts backend + frontend
+./run.ps1 -Setup     # only install dependencies, don't start servers
+```
+
+The first run creates `backend/.env` from the template - fill in your Bungie
+credentials and re-run. The manual steps are below if you prefer them.
+
 ## 1. Register a Bungie application
 
 1. Go to https://www.bungie.net/en/Application and create a new app.
