@@ -10,11 +10,20 @@ from . import auth
 API_ROOT = "https://www.bungie.net/Platform"
 BUNGIE_ROOT = "https://www.bungie.net"
 
+_http_client: Optional[httpx.AsyncClient] = None
+
 
 class BungieError(Exception):
     def __init__(self, message: str, status_code: int = 502):
         super().__init__(message)
         self.status_code = status_code
+
+
+def _client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(timeout=60, http2=False)
+    return _http_client
 
 
 async def _headers(authed: bool) -> dict[str, str]:
@@ -32,8 +41,7 @@ async def get(path: str, *, params: Optional[dict] = None, authed: bool = False)
     """GET a Platform endpoint and unwrap the standard Bungie response envelope."""
     url = path if path.startswith("http") else f"{API_ROOT}{path}"
     headers = await _headers(authed)
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.get(url, headers=headers, params=params)
+    resp = await _client().get(url, headers=headers, params=params)
     if resp.status_code >= 400:
         raise BungieError(f"Bungie API error {resp.status_code}: {resp.text[:300]}", resp.status_code)
     payload = resp.json()
@@ -50,8 +58,7 @@ async def post(path: str, *, json: Optional[dict] = None, authed: bool = True) -
     url = path if path.startswith("http") else f"{API_ROOT}{path}"
     headers = await _headers(authed)
     headers["Content-Type"] = "application/json"
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(url, headers=headers, json=json)
+    resp = await _client().post(url, headers=headers, json=json)
     if resp.status_code >= 400:
         # Try to surface Bungie's structured error message.
         try:
@@ -72,8 +79,7 @@ async def post(path: str, *, json: Optional[dict] = None, authed: bool = True) -
 async def get_raw(url: str) -> bytes:
     """Fetch a raw asset (e.g. a manifest content file) from bungie.net."""
     full = url if url.startswith("http") else f"{BUNGIE_ROOT}{url}"
-    async with httpx.AsyncClient(timeout=180) as client:
-        resp = await client.get(full)
+    resp = await _client().get(full, timeout=180)
     if resp.status_code >= 400:
         raise BungieError(f"Failed to fetch {full}: {resp.status_code}", resp.status_code)
     return resp.content

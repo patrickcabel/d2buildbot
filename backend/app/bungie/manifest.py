@@ -76,8 +76,34 @@ def _missing_tables() -> list[str]:
     return [t for t in NEEDED_TABLES if t not in present]
 
 
+def _prepare_table(table: str, data: dict) -> tuple[list[tuple], list[tuple]]:
+    """Turn a downloaded definition table into DB row batches."""
+    rows: list[tuple] = []
+    name_rows: list[tuple] = []
+    for hash_str, definition in data.items():
+        try:
+            h = int(hash_str)
+        except ValueError:
+            continue
+        rows.append((table, h, json.dumps(definition)))
+        if table != "DestinyInventoryItemDefinition":
+            continue
+        name = (definition.get("displayProperties") or {}).get("name") or ""
+        if not name or definition.get("redacted"):
+            continue
+        entity = _classify(definition)
+        if entity is None:
+            continue
+        tier = (definition.get("inventory") or {}).get("tierType", 0)
+        is_exotic = 1 if tier == 6 else 0
+        class_type = definition.get("classType", 3)
+        name_rows.append((h, name, _normalize(name), entity, is_exotic, class_type))
+    return rows, name_rows
+
+
 async def sync_manifest(force: bool = False) -> dict:
     """Download and cache needed definition tables if the version changed."""
+    import asyncio
     import time
 
     meta = await get_manifest_meta()
@@ -89,68 +115,68 @@ async def sync_manifest(force: bool = False) -> dict:
 
     # Download + parse outside any DB lock so inventory/auth requests aren't blocked
     # for minutes (holding the lock during network I/O was wedging the server).
+    # Parse/serialize in a worker thread so the event loop stays responsive.
     prepared: list[tuple[str, list[tuple], list[tuple]]] = []
     for table in NEEDED_TABLES:
         rel = paths.get(table)
         if not rel:
             continue
         content = await client.get_raw(rel)
-        data = json.loads(content)
-        rows: list[tuple] = []
-        name_rows: list[tuple] = []
-        for hash_str, definition in data.items():
-            try:
-                h = int(hash_str)
-            except ValueError:
-                continue
-            rows.append((table, h, json.dumps(definition)))
-            if table == "DestinyInventoryItemDefinition":
-                name = (definition.get("displayProperties") or {}).get("name") or ""
-                if not name or definition.get("redacted"):
-                    continue
-                entity = _classify(definition)
-                if entity is None:
-                    continue
-                tier = (definition.get("inventory") or {}).get("tierType", 0)
-                is_exotic = 1 if tier == 6 else 0
-                class_type = definition.get("classType", 3)
-                name_rows.append(
-                    (h, name, _normalize(name), entity, is_exotic, class_type)
-                )
+        data = await asyncio.to_thread(json.loads, content)
+        rows, name_rows = await asyncio.to_thread(_prepare_table, table, data)
         prepared.append((table, rows, name_rows))
+        del data  # free large dict before next table
 
-    with db() as conn:
-        conn.execute("DELETE FROM manifest_defs")
-        conn.execute("DELETE FROM name_index")
-        for _table, rows, name_rows in prepared:
-            if rows:
-                conn.executemany(
-                    "INSERT OR REPLACE INTO manifest_defs (table_name, hash, json) "
-                    "VALUES (?, ?, ?)",
-                    rows,
-                )
-            if name_rows:
-                conn.executemany(
-                    "INSERT OR REPLACE INTO name_index "
-                    "(hash, name, normalized, entity_type, is_exotic, class_type) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    name_rows,
-                )
-        conn.execute(
-            "INSERT INTO manifest_meta (id, version, updated_at) VALUES (1, ?, ?) "
-            "ON CONFLICT(id) DO UPDATE SET version=excluded.version, updated_at=excluded.updated_at",
-            (version, time.time()),
-        )
+    def _write_db() -> None:
+        with db() as conn:
+            conn.execute("DELETE FROM manifest_defs")
+            conn.execute("DELETE FROM name_index")
+            for _table, rows, name_rows in prepared:
+                if rows:
+                    conn.executemany(
+                        "INSERT OR REPLACE INTO manifest_defs (table_name, hash, json) "
+                        "VALUES (?, ?, ?)",
+                        rows,
+                    )
+                if name_rows:
+                    conn.executemany(
+                        "INSERT OR REPLACE INTO name_index "
+                        "(hash, name, normalized, entity_type, is_exotic, class_type) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        name_rows,
+                    )
+            conn.execute(
+                "INSERT INTO manifest_meta (id, version, updated_at) VALUES (1, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET version=excluded.version, updated_at=excluded.updated_at",
+                (version, time.time()),
+            )
+
+    await asyncio.to_thread(_write_db)
+    clear_definition_cache()
     return {"status": "synced", "version": version}
 
 
+# Process-level definition cache — avoid opening SQLite + json.loads per hash
+# during profile normalize (thousands of lookups).
+_def_cache: dict[tuple[str, int], Optional[dict]] = {}
+
+
+def clear_definition_cache() -> None:
+    _def_cache.clear()
+
+
 def get_definition(table: str, hash_: int) -> Optional[dict]:
+    key = (table, int(hash_))
+    if key in _def_cache:
+        return _def_cache[key]
     with db() as conn:
         row = conn.execute(
             "SELECT json FROM manifest_defs WHERE table_name = ? AND hash = ?",
             (table, hash_),
         ).fetchone()
-    return json.loads(row["json"]) if row else None
+    value = json.loads(row["json"]) if row else None
+    _def_cache[key] = value
+    return value
 
 
 def get_item(hash_: int) -> Optional[dict]:
@@ -160,14 +186,40 @@ def get_item(hash_: int) -> Optional[dict]:
 def get_definitions(table: str, hashes: list[int]) -> dict[int, dict]:
     if not hashes:
         return {}
+    unique = list({int(h) for h in hashes})
+    out: dict[int, dict] = {}
+    missing: list[int] = []
+    for h in unique:
+        key = (table, h)
+        if key in _def_cache:
+            cached = _def_cache[key]
+            if cached is not None:
+                out[h] = cached
+        else:
+            missing.append(h)
+    if not missing:
+        return out
+    # SQLite has a practical bind-variable limit; chunk large IN lists.
+    chunk = 800
     with db() as conn:
-        placeholders = ",".join("?" * len(hashes))
-        rows = conn.execute(
-            f"SELECT hash, json FROM manifest_defs "
-            f"WHERE table_name = ? AND hash IN ({placeholders})",
-            [table, *hashes],
-        ).fetchall()
-    return {row["hash"]: json.loads(row["json"]) for row in rows}
+        for i in range(0, len(missing), chunk):
+            part = missing[i : i + chunk]
+            placeholders = ",".join("?" * len(part))
+            rows = conn.execute(
+                f"SELECT hash, json FROM manifest_defs "
+                f"WHERE table_name = ? AND hash IN ({placeholders})",
+                [table, *part],
+            ).fetchall()
+            found = {int(row["hash"]) for row in rows}
+            for row in rows:
+                h = int(row["hash"])
+                value = json.loads(row["json"])
+                _def_cache[(table, h)] = value
+                out[h] = value
+            for h in part:
+                if h not in found:
+                    _def_cache[(table, h)] = None
+    return out
 
 
 def search_names(query: str, entity_types: Optional[list[str]] = None, limit: int = 25) -> list[dict]:

@@ -1,5 +1,28 @@
-import { DragEvent, useEffect, useMemo, useState } from "react";
-import { api, Character, Item, ItemDetail, Profile } from "../api";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  DndContext,
+  DragEndEvent,
+  DragOverlay,
+  DragStartEvent,
+  PointerSensor,
+  pointerWithin,
+  useDraggable,
+  useDroppable,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import {
+  api,
+  ArmorDupeGroup,
+  ArmorDupePiece,
+  Character,
+  Item,
+  ItemDetail,
+  Profile,
+  VaultCleanScan,
+  WeaponDupeGroup,
+  WeaponDupePiece,
+} from "../api";
 
 // DIM-style rarity border colors.
 const RARITY_COLOR: Record<string, string> = {
@@ -205,19 +228,18 @@ function matchesQuery(i: Item, query: string): boolean {
 // --- Tile ------------------------------------------------------------------
 const TILE_SIZE = "w-14 h-14"; // 56px — slightly larger, DIM-like
 
-function Tile({
+function TileFace({
   item,
-  onSelect,
   dimmed = false,
+  ghost = false,
 }: {
   item: Item;
-  onSelect?: (i: Item) => void;
   dimmed?: boolean;
+  ghost?: boolean;
 }) {
   const rarity = RARITY_COLOR[item.tier] || RARITY_COLOR.unknown;
   const bg = RARITY_BG[item.tier] || RARITY_BG.unknown;
   const equipped = item.location === "equipped";
-  // DIM priority: masterwork gold > equipped white > crafted red > subtle.
   const borderColor = item.isMasterwork
     ? MW_GOLD
     : equipped
@@ -226,39 +248,22 @@ function Tile({
         ? CRAFTED_RED
         : "rgba(255,255,255,0.28)";
   const borderWidth = item.isMasterwork || equipped || item.isCrafted ? 2 : 1;
-  const draggable = !!item.itemInstanceId && !dimmed;
+  const wlTier = item.wishlist?.tier || (item.wishlist?.is_wishlisted ? "god" : "none");
+  const isGod = wlTier === "god" || !!item.wishlist?.is_wishlisted;
+  const isNear = wlTier === "near";
 
   return (
     <div
-      draggable={draggable}
-      onDragStart={(e) => {
-        if (dimmed) {
-          e.preventDefault();
-          return;
-        }
-        e.dataTransfer.setData("application/json", JSON.stringify(item));
-        e.dataTransfer.effectAllowed = "move";
-      }}
-      onClick={() => !dimmed && item.itemInstanceId && onSelect?.(item)}
-      className={`relative box-border ${TILE_SIZE} shrink-0 overflow-hidden transition-opacity ${
-        dimmed
-          ? "opacity-40 cursor-default"
-          : item.itemInstanceId
-            ? "cursor-pointer"
-            : ""
-      } ${draggable ? "active:cursor-grabbing" : ""}`}
+      className={`relative box-border ${TILE_SIZE} shrink-0 overflow-hidden ${
+        dimmed ? "opacity-40" : ""
+      } ${ghost ? "shadow-xl shadow-black/50 scale-105" : ""} ${
+        isGod && !dimmed ? "ring-2 ring-[#f5dc56] ring-offset-1 ring-offset-black" : ""
+      }`}
       style={{
         backgroundColor: bg,
-        border: `${borderWidth}px solid ${borderColor}`,
+        border: `${borderWidth}px solid ${isGod ? MW_GOLD : borderColor}`,
         boxShadow: item.isMasterwork && !dimmed ? `inset 0 -6px 8px -3px ${MW_GOLD}` : undefined,
       }}
-      title={`${item.name}${item.power ? ` · ${item.power}` : ""}${
-        item.damageName ? ` · ${item.damageName}` : ""
-      } · ${item.tier}${item.isMasterwork ? " · Masterwork" : ""}${
-        equipped ? " · Equipped" : ""
-      }${item.isCrafted ? " · Crafted" : ""}${item.hasOrnament ? " · Ornament" : ""}${
-        dimmed ? " · (filtered out)" : ""
-      }`}
     >
       {item.icon ? (
         <img
@@ -269,42 +274,140 @@ function Tile({
           draggable={false}
         />
       ) : null}
-
-      {/* Tier strip — full rarity color bar (DIM) */}
       <span
         className="absolute bottom-0 left-0 right-0 h-[4px] pointer-events-none"
-        style={{ background: item.isMasterwork ? MW_GOLD : rarity }}
+        style={{ background: item.isMasterwork || isGod ? MW_GOLD : rarity }}
       />
-      {/* Soft rarity wash so tier reads even when icon is opaque */}
       <span
         className="absolute inset-x-0 bottom-0 h-1/3 pointer-events-none"
-        style={{
-          background: `linear-gradient(to top, ${rarity}55, transparent)`,
-        }}
+        style={{ background: `linear-gradient(to top, ${rarity}55, transparent)` }}
       />
-
       {item.damageIcon ? (
         <img
           src={item.damageIcon}
           alt=""
-          className="absolute top-0 left-0 w-4 h-4 bg-black/70 p-px pointer-events-none"
+          className={`absolute left-0 w-4 h-4 bg-black/70 p-px pointer-events-none ${
+            isGod ? "top-[14px]" : "top-0"
+          }`}
           draggable={false}
         />
       ) : null}
-
       {item.hasOrnament ? (
         <span
           className="absolute top-0 right-0 w-2 h-2 rounded-bl pointer-events-none"
           style={{ background: "#7ec8ff" }}
-          title="Ornament / transmog"
         />
       ) : null}
-
+      {isGod && (
+        <span
+          className="absolute top-0 left-0 right-0 text-[9px] font-black tracking-wide text-center leading-none py-0.5 pointer-events-none"
+          style={{
+            background: "linear-gradient(to bottom, #f5dc56, #c9a227)",
+            color: "#1a1200",
+            textShadow: "0 0 1px rgba(255,255,255,0.4)",
+          }}
+          title={item.wishlist?.notes || "Wishlist god roll"}
+        >
+          GOD
+        </span>
+      )}
+      {!isGod && isNear && (
+        <span
+          className="absolute top-0 left-0 px-0.5 text-[8px] font-bold leading-none py-0.5 pointer-events-none bg-amber-500/90 text-black"
+          title={
+            item.wishlist?.notes ||
+            `${item.wishlist?.matched_perks || 0}/${item.wishlist?.needed_perks || "?"} wishlist perks`
+          }
+        >
+          NEAR
+        </span>
+      )}
       {item.power != null ? (
         <span className="absolute bottom-[4px] right-0 text-[10px] leading-none px-0.5 bg-black/75 text-[#c3f0ff] tabular-nums pointer-events-none font-medium">
           {item.power}
         </span>
       ) : null}
+    </div>
+  );
+}
+
+function sortInventoryItems(items: Item[]): Item[] {
+  return [...items].sort((a, b) => {
+    const sa = a.wishlistScore ?? (a.wishlist?.is_wishlisted ? 1000 : (a.wishlist?.matched_perks || 0) * 10);
+    const sb = b.wishlistScore ?? (b.wishlist?.is_wishlisted ? 1000 : (b.wishlist?.matched_perks || 0) * 10);
+    if (sa !== sb) return sb - sa;
+    return (b.power || 0) - (a.power || 0);
+  });
+}
+
+function Tile({
+  item,
+  onSelect,
+  dimmed = false,
+}: {
+  item: Item;
+  onSelect?: (i: Item) => void;
+  dimmed?: boolean;
+}) {
+  const id = item.itemInstanceId || `hash-${item.itemHash}`;
+  const canDrag = !!item.itemInstanceId && !dimmed;
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id,
+    data: { item },
+    disabled: !canDrag,
+  });
+
+  return (
+    <div
+      ref={setNodeRef}
+      {...(canDrag ? listeners : {})}
+      {...(canDrag ? attributes : {})}
+      onClick={() => !dimmed && item.itemInstanceId && onSelect?.(item)}
+      className={`touch-none ${
+        dimmed
+          ? "opacity-40 cursor-default"
+          : canDrag
+            ? "cursor-grab active:cursor-grabbing"
+            : item.itemInstanceId
+              ? "cursor-pointer"
+              : ""
+      } ${isDragging ? "opacity-30" : ""}`}
+      title={`${item.name}${item.power ? ` · ${item.power}` : ""}${
+        item.damageName ? ` · ${item.damageName}` : ""
+      } · ${item.tier}${item.isMasterwork ? " · Masterwork" : ""}${
+        item.location === "equipped" ? " · Equipped" : ""
+      }${item.isCrafted ? " · Crafted" : ""}${item.hasOrnament ? " · Ornament" : ""}${
+        dimmed ? " · (filtered out)" : ""
+      }`}
+    >
+      <TileFace item={item} dimmed={dimmed} />
+    </div>
+  );
+}
+
+function DropZone({
+  id,
+  data,
+  className = "",
+  overClassName = "",
+  title,
+  children,
+}: {
+  id: string;
+  data: { kind: "move" | "equip"; toStore?: string; characterId?: string };
+  className?: string;
+  overClassName?: string;
+  title?: string;
+  children: ReactNode;
+}) {
+  const { setNodeRef, isOver } = useDroppable({ id, data });
+  return (
+    <div
+      ref={setNodeRef}
+      title={title}
+      className={`${className} ${isOver ? overClassName : ""}`}
+    >
+      {children}
     </div>
   );
 }
@@ -555,6 +658,412 @@ function ItemDetailModal({ item, onClose }: { item: Item; onClose: () => void })
   );
 }
 
+// --- Armor dupe finder -----------------------------------------------------
+const SLOT_LABELS: Record<string, string> = {
+  helmet: "Helmet",
+  gauntlets: "Arms",
+  chest: "Chest",
+  legs: "Legs",
+  class: "Class",
+};
+
+function locLabelItem(p: { location: string }): string {
+  if (p.location === "vault") return "Vault";
+  if (p.location === "equipped") return "Equipped";
+  return "Inventory";
+}
+
+function wlBadge(tier: string | undefined) {
+  if (tier === "god") {
+    return (
+      <span className="text-[10px] font-black px-1.5 py-0.5 rounded bg-[#f5dc56] text-black tracking-wide">
+        GOD ROLL
+      </span>
+    );
+  }
+  if (tier === "near") {
+    return (
+      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500/90 text-black">
+        NEAR
+      </span>
+    );
+  }
+  return null;
+}
+
+function VaultCleanPanel({
+  open,
+  onClose,
+  onVaulted,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onVaulted: () => void;
+}) {
+  const [tab, setTab] = useState<"weapons" | "armor">("weapons");
+  const [scan, setScan] = useState<VaultCleanScan | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [keepByGroup, setKeepByGroup] = useState<Record<string, string>>({});
+  const [vaulting, setVaulting] = useState<string | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
+
+  function seedKeeps(res: VaultCleanScan) {
+    const initial: Record<string, string> = {};
+    res.weapons.groups.forEach((g, i) => {
+      const god = g.pieces.find((p) => p.wishlist?.tier === "god" || p.wishlist?.is_wishlisted);
+      initial[`w-${i}`] = (god || g.pieces[0]).itemInstanceId;
+    });
+    res.armor.groups.forEach((g, i) => {
+      const tuned = g.pieces.find((p) => p.tuning && !p.tuning.isEmpty);
+      initial[`a-${i}`] = (tuned || g.pieces[0]).itemInstanceId;
+    });
+    setKeepByGroup(initial);
+  }
+
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    setLoading(true);
+    setError(null);
+    setStatus(null);
+    setScan(null);
+    setKeepByGroup({});
+    api
+      .vaultClean()
+      .then((res) => {
+        if (!alive) return;
+        setScan(res);
+        seedKeeps(res);
+      })
+      .catch((e) => alive && setError((e as Error).message))
+      .finally(() => alive && setLoading(false));
+    return () => {
+      alive = false;
+    };
+  }, [open]);
+
+  if (!open) return null;
+
+  async function vaultOthers(
+    key: string,
+    pieces: { itemInstanceId: string; name: string; location: string }[]
+  ) {
+    const keepId = keepByGroup[key];
+    if (!keepId) return;
+    const toVault = pieces.filter((p) => p.itemInstanceId !== keepId && p.location !== "vault");
+    const alreadyVaulted = pieces.filter(
+      (p) => p.itemInstanceId !== keepId && p.location === "vault"
+    );
+    if (!toVault.length && alreadyVaulted.length) {
+      setStatus(
+        "The other copies are already in the Vault. Dismantle them in-game if you want them gone."
+      );
+      return;
+    }
+    if (!toVault.length) {
+      setStatus("Nothing to vault for this group.");
+      return;
+    }
+    setVaulting(key);
+    setStatus(null);
+    const errors: string[] = [];
+    let moved = 0;
+    for (const p of toVault) {
+      try {
+        await api.moveItem({ itemInstanceId: p.itemInstanceId, toStore: "vault" });
+        moved += 1;
+      } catch (e) {
+        errors.push(`${p.name}: ${(e as Error).message}`);
+      }
+    }
+    setVaulting(null);
+    if (errors.length) setStatus(`Vaulted ${moved}. Issues: ${errors.slice(0, 2).join("; ")}`);
+    else setStatus(`Vaulted ${moved} duplicate(s). Kept the selected piece.`);
+    onVaulted();
+    try {
+      const res = await api.vaultClean();
+      setScan(res);
+      seedKeeps(res);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const weaponGroups = scan?.weapons.groups || [];
+  const armorGroups = scan?.armor.groups || [];
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center p-4 pt-16 bg-black/70 overflow-y-auto">
+      <div className="w-full max-w-3xl rounded-lg border border-white/15 bg-[#12151c] shadow-xl">
+        <div className="flex items-start gap-3 px-4 py-3 border-b border-white/10">
+          <div className="min-w-0 flex-1">
+            <h2 className="text-base font-semibold text-white">Vault cleaner</h2>
+            <p className="text-xs text-white/50 mt-0.5">
+              Find weapon + armor duplicates. Keep the best roll (god rolls / tuning), vault the rest.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-2 py-1 rounded text-white/50 hover:text-white hover:bg-white/10"
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="px-4 pt-3 flex gap-1">
+          {(
+            [
+              ["weapons", `Weapons (${weaponGroups.length})`],
+              ["armor", `Armor (${armorGroups.length})`],
+            ] as const
+          ).map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setTab(id)}
+              className={`px-3 py-1.5 rounded text-sm ${
+                tab === id ? "bg-white/15 text-white" : "text-white/50 hover:text-white"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <div className="p-4 space-y-4 max-h-[70vh] overflow-y-auto">
+          {loading && <p className="text-sm text-white/50">Scanning vault…</p>}
+          {error && <p className="text-sm text-red-400">{error}</p>}
+          {status && <p className="text-sm text-emerald-300">{status}</p>}
+
+          {scan && !loading && tab === "weapons" && (
+            <>
+              <p className="text-xs text-white/40">
+                Scanned {scan.weapons.scanned} weapons · {scan.weapons.groupCount} duplicate group
+                {scan.weapons.groupCount === 1 ? "" : "s"}
+              </p>
+              {weaponGroups.length === 0 && (
+                <p className="text-sm text-white/50 py-6 text-center">No duplicate weapons found.</p>
+              )}
+              {weaponGroups.map((group: WeaponDupeGroup, gi: number) => {
+                const key = `w-${gi}`;
+                return (
+                  <div
+                    key={group.itemHash + "-" + gi}
+                    className="rounded border border-white/10 bg-white/[0.03] overflow-hidden"
+                  >
+                    <div className="flex flex-wrap items-center gap-2 px-3 py-2 bg-white/[0.04] border-b border-white/10">
+                      {group.icon && (
+                        <img src={group.icon} alt="" className="w-7 h-7 rounded border border-white/15" />
+                      )}
+                      <span className="text-sm text-white/80">{group.name}</span>
+                      <span className="text-xs text-white/35 capitalize">{group.slot}</span>
+                      <span className="text-xs text-white/35">{group.count} copies</span>
+                      {group.hasGodRoll && (
+                        <span className="text-[10px] font-black px-1.5 py-0.5 rounded bg-[#f5dc56] text-black">
+                          HAS GOD ROLL
+                        </span>
+                      )}
+                      {group.wishlistDiffers && (
+                        <span className="text-[10px] uppercase tracking-wide text-amber-300/90 bg-amber-400/10 px-1.5 py-0.5 rounded">
+                          Rolls differ
+                        </span>
+                      )}
+                    </div>
+                    <div className="divide-y divide-white/5">
+                      {group.pieces.map((p: WeaponDupePiece) => {
+                        const selected = keepByGroup[key] === p.itemInstanceId;
+                        return (
+                          <label
+                            key={p.itemInstanceId}
+                            className={`flex items-center gap-3 px-3 py-2 cursor-pointer ${
+                              selected ? "bg-exotic/10" : "hover:bg-white/[0.04]"
+                            }`}
+                          >
+                            <input
+                              type="radio"
+                              name={`dupe-${key}`}
+                              checked={selected}
+                              onChange={() =>
+                                setKeepByGroup((prev) => ({ ...prev, [key]: p.itemInstanceId }))
+                              }
+                              className="accent-[#ceae33]"
+                            />
+                            {p.icon && (
+                              <img
+                                src={p.icon}
+                                alt=""
+                                className="w-10 h-10 rounded border border-white/15 object-cover shrink-0"
+                              />
+                            )}
+                            <div className="min-w-0 flex-1">
+                              <div className="text-sm truncate flex items-center gap-2 flex-wrap">
+                                <span className={p.isExotic ? "text-exotic" : ""}>{p.name}</span>
+                                {p.power != null && (
+                                  <span className="text-white/40 tabular-nums">{p.power}</span>
+                                )}
+                                {wlBadge(p.wishlist?.tier)}
+                                {selected && (
+                                  <span className="text-[10px] uppercase text-exotic">Keep</span>
+                                )}
+                              </div>
+                              <div className="text-[11px] text-white/45 truncate">
+                                {locLabelItem(p)}
+                                {p.isMasterwork ? " · Masterwork" : ""}
+                                {p.wishlist?.matched_perks
+                                  ? ` · ${p.wishlist.matched_perks}/${p.wishlist.needed_perks || "?"} wishlist perks`
+                                  : ""}
+                                {p.wishlist?.notes ? ` · ${p.wishlist.notes}` : ""}
+                              </div>
+                            </div>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    <div className="px-3 py-2 border-t border-white/10 flex justify-end">
+                      <button
+                        type="button"
+                        disabled={vaulting === key || !keepByGroup[key]}
+                        onClick={() => vaultOthers(key, group.pieces)}
+                        className="px-3 py-1.5 rounded bg-white/10 hover:bg-white/15 text-sm disabled:opacity-40"
+                      >
+                        {vaulting === key ? "Vaulting…" : "Vault the others"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </>
+          )}
+
+          {scan && !loading && tab === "armor" && (
+            <>
+              <p className="text-xs text-white/40">
+                Scanned {scan.armor.scanned} Armor 3.0 pieces · {scan.armor.groupCount} duplicate
+                group{scan.armor.groupCount === 1 ? "" : "s"}
+              </p>
+              {armorGroups.length === 0 && (
+                <p className="text-sm text-white/50 py-6 text-center">
+                  No duplicate armor base rolls found.
+                </p>
+              )}
+              {armorGroups.map((group: ArmorDupeGroup, gi: number) => {
+                const key = `a-${gi}`;
+                return (
+                  <div
+                    key={`${group.classType}-${group.slot}-${gi}`}
+                    className="rounded border border-white/10 bg-white/[0.03] overflow-hidden"
+                  >
+                    <div className="flex flex-wrap items-center gap-2 px-3 py-2 bg-white/[0.04] border-b border-white/10">
+                      <ClassIcon classType={group.classType} className="w-3.5 h-3.5 text-white/60" />
+                      <span className="text-sm capitalize text-white/80">
+                        {group.classType} · {SLOT_LABELS[group.slot] || group.slot}
+                      </span>
+                      {group.archetype?.name && (
+                        <span className="text-xs text-exotic/90">{group.archetype.name}</span>
+                      )}
+                      <span className="text-xs text-white/35">{group.count} copies</span>
+                      {group.tuningDiffers && (
+                        <span className="text-[10px] uppercase tracking-wide text-amber-300/90 bg-amber-400/10 px-1.5 py-0.5 rounded">
+                          Tuning differs
+                        </span>
+                      )}
+                      <div className="ml-auto flex flex-wrap gap-1 text-[11px] tabular-nums text-white/55">
+                        {(scan.armor.statOrder || Object.keys(group.rollStats)).map((s) => (
+                          <span key={s} title={s}>
+                            {s.slice(0, 1)}
+                            <span className="text-white/80">{group.rollStats[s] ?? 0}</span>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="divide-y divide-white/5">
+                      {group.pieces.map((p: ArmorDupePiece) => {
+                        const selected = keepByGroup[key] === p.itemInstanceId;
+                        return (
+                          <label
+                            key={p.itemInstanceId}
+                            className={`flex items-center gap-3 px-3 py-2 cursor-pointer ${
+                              selected ? "bg-exotic/10" : "hover:bg-white/[0.04]"
+                            }`}
+                          >
+                            <input
+                              type="radio"
+                              name={`dupe-${key}`}
+                              checked={selected}
+                              onChange={() =>
+                                setKeepByGroup((prev) => ({ ...prev, [key]: p.itemInstanceId }))
+                              }
+                              className="accent-[#ceae33]"
+                            />
+                            {p.icon && (
+                              <img
+                                src={p.icon}
+                                alt=""
+                                className="w-10 h-10 rounded border border-white/15 object-cover shrink-0"
+                              />
+                            )}
+                            <div className="min-w-0 flex-1">
+                              <div className="text-sm truncate">
+                                <span className={p.isExotic ? "text-exotic" : ""}>{p.name}</span>
+                                {p.power != null && (
+                                  <span className="text-white/40 ml-1.5 tabular-nums">{p.power}</span>
+                                )}
+                                {selected && (
+                                  <span className="ml-2 text-[10px] uppercase text-exotic">Keep</span>
+                                )}
+                              </div>
+                              <div className="text-[11px] text-white/45 truncate">
+                                {locLabelItem(p)}
+                                {p.isMasterwork ? " · Masterwork" : ""}
+                              </div>
+                            </div>
+                            <div
+                              className="shrink-0 flex items-center gap-1.5 max-w-[11rem]"
+                              title={p.tuning?.name || "No tuning socket"}
+                            >
+                              {p.tuning?.icon && (
+                                <img
+                                  src={p.tuning.icon}
+                                  alt=""
+                                  className="w-7 h-7 rounded border border-white/15 object-cover"
+                                />
+                              )}
+                              <span
+                                className={`text-[11px] leading-tight ${
+                                  p.tuning && !p.tuning.isEmpty ? "text-emerald-300" : "text-white/40"
+                                }`}
+                              >
+                                {p.tuning?.name || "No tuning"}
+                              </span>
+                            </div>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    <div className="px-3 py-2 border-t border-white/10 flex justify-end">
+                      <button
+                        type="button"
+                        disabled={vaulting === key || !keepByGroup[key]}
+                        onClick={() => vaultOthers(key, group.pieces)}
+                        className="px-3 py-1.5 rounded bg-white/10 hover:bg-white/15 text-sm disabled:opacity-40"
+                      >
+                        {vaulting === key ? "Vaulting…" : "Vault the others"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 type StoreItems = { equipped: Record<string, Item[]>; carried: Record<string, Item[]> };
 
 export default function Inventory({ authed }: { authed: boolean }) {
@@ -564,8 +1073,16 @@ export default function Inventory({ authed }: { authed: boolean }) {
   const [search, setSearch] = useState("");
   const [busy, setBusy] = useState(false);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
-  const [hoverZone, setHoverZone] = useState<string | null>(null);
   const [selected, setSelected] = useState<Item | null>(null);
+  const [dupeOpen, setDupeOpen] = useState(false);
+  const [activeItem, setActiveItem] = useState<Item | null>(null);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      // Small move before drag so clicks still open item detail.
+      activationConstraint: { distance: 6 },
+    })
+  );
 
   async function load() {
     setLoading(true);
@@ -665,58 +1182,64 @@ export default function Inventory({ authed }: { authed: boolean }) {
     });
   }
 
-  async function runAction(fn: () => Promise<{ message: string }>) {
+  async function runAction(fn: () => Promise<{ message: string }>, opts?: { reload?: boolean }) {
     setBusy(true);
     setActionMsg(null);
     try {
       const res = await fn();
       setActionMsg(res.message);
-      await load();
+      // Optimistic UI already updated — skip full profile reload (that was the sticky lag).
+      if (opts?.reload) await load();
     } catch (e) {
       setActionMsg("Action failed: " + (e as Error).message);
-      // Restore authoritative state after a failed optimistic move.
       await load();
     } finally {
       setBusy(false);
     }
   }
 
-  function readItem(e: DragEvent): Item | null {
-    const raw = e.dataTransfer.getData("application/json");
-    return raw ? (JSON.parse(raw) as Item) : null;
-  }
-
-  function onDropMove(toStore: string, e: DragEvent) {
-    e.preventDefault();
-    e.stopPropagation();
-    setHoverZone(null);
-    const item = readItem(e);
-    if (!item?.itemInstanceId) return;
-    // No-op: already in that store's inventory.
+  function transferMove(item: Item, toStore: string) {
+    if (!item.itemInstanceId) return;
     if (toStore === "vault" && item.location === "vault") return;
     if (toStore !== "vault" && item.location === "character" && item.characterId === toStore) {
       return;
     }
-    // Character → vault (or char→char): open the empty slot immediately like DIM.
     optimisticMove(item, toStore);
-    runAction(() => api.moveItem({ itemInstanceId: item.itemInstanceId!, toStore }));
+    void runAction(() => api.moveItem({ itemInstanceId: item.itemInstanceId!, toStore }));
   }
 
-  function onDropEquip(characterId: string, e: DragEvent) {
-    e.preventDefault();
-    e.stopPropagation();
-    setHoverZone(null);
-    const item = readItem(e);
-    if (!item?.itemInstanceId) return;
+  function transferEquip(item: Item, characterId: string) {
+    if (!item.itemInstanceId) return;
     if (item.location === "equipped" && item.characterId === characterId) return;
     optimisticEquip(item, characterId);
-    runAction(() => api.equipItem({ itemInstanceId: item.itemInstanceId!, characterId }));
+    void runAction(() => api.equipItem({ itemInstanceId: item.itemInstanceId!, characterId }));
   }
 
-  function allow(zone: string, e: DragEvent) {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-    if (hoverZone !== zone) setHoverZone(zone);
+  function onDragStart(event: DragStartEvent) {
+    const item = event.active.data.current?.item as Item | undefined;
+    setActiveItem(item || null);
+  }
+
+  function onDragEnd(event: DragEndEvent) {
+    setActiveItem(null);
+    const item = event.active.data.current?.item as Item | undefined;
+    const over = event.over;
+    if (!item?.itemInstanceId || !over) return;
+    const data = over.data.current as
+      | { kind: "move" | "equip"; toStore?: string; characterId?: string }
+      | undefined;
+    if (!data) return;
+    if (data.kind === "equip" && data.characterId) {
+      transferEquip(item, data.characterId);
+      return;
+    }
+    if (data.kind === "move" && data.toStore) {
+      transferMove(item, data.toStore);
+    }
+  }
+
+  function onDragCancel() {
+    setActiveItem(null);
   }
 
   if (!authed) return <p className="text-white/60">Log in to view your inventory.</p>;
@@ -735,8 +1258,8 @@ export default function Inventory({ authed }: { authed: boolean }) {
 
   function CharCell({ character, group }: { character: Character; group: { key: string; label: string } }) {
     const store = byChar[character.characterId];
-    const equipped = store?.equipped[group.key] || [];
-    const carried = store?.carried[group.key] || [];
+    const equipped = sortInventoryItems(store?.equipped[group.key] || []);
+    const carried = sortInventoryItems(store?.carried[group.key] || []);
     const equipZone = `equip:${character.characterId}:${group.key}`;
     const cellZone = `char:${character.characterId}:${group.key}`;
     // In-game character inventory holds 9 items per bucket (+ 1 equipped).
@@ -745,23 +1268,17 @@ export default function Inventory({ authed }: { authed: boolean }) {
     while (slots.length < MAX_INV) slots.push(null);
 
     return (
-      <div
-        onDragOver={(e) => allow(cellZone, e)}
-        onDragLeave={() => setHoverZone(null)}
-        onDrop={(e) => onDropMove(character.characterId, e)}
-        className={`flex gap-2 p-2 min-w-0 rounded-sm ${
-          hoverZone === cellZone ? "bg-blue-500/10 ring-1 ring-blue-400/40" : ""
-        }`}
+      <DropZone
+        id={cellZone}
+        data={{ kind: "move", toStore: character.characterId }}
+        className="flex gap-2 p-2 min-w-0 rounded-sm"
+        overClassName="bg-blue-500/10 ring-1 ring-blue-400/40"
       >
-        {/* Equipped — single boxed slot */}
-        <div
-          onDragOver={(e) => allow(equipZone, e)}
-          onDrop={(e) => onDropEquip(character.characterId, e)}
-          className={`shrink-0 p-1.5 rounded-sm border self-start ${
-            hoverZone === equipZone
-              ? "bg-exotic/15 border-exotic/60"
-              : "bg-black/25 border-white/15"
-          }`}
+        <DropZone
+          id={equipZone}
+          data={{ kind: "equip", characterId: character.characterId }}
+          className="shrink-0 p-1.5 rounded-sm border self-start bg-black/25 border-white/15"
+          overClassName="!bg-exotic/15 !border-exotic/60"
           title="Equipped (drop to equip)"
         >
           {equipped.length ? (
@@ -771,14 +1288,9 @@ export default function Inventory({ authed }: { authed: boolean }) {
           ) : (
             <div className={`box-border ${TILE_SIZE} border border-dashed border-white/20`} />
           )}
-        </div>
+        </DropZone>
 
-        {/* Character inventory — max 10 slots, 3-wide like the game */}
-        <div
-          className="grid grid-cols-3 gap-1 p-1.5 rounded-sm bg-black/20 border border-white/10 content-start w-max"
-          onDragOver={(e) => allow(cellZone, e)}
-          onDrop={(e) => onDropMove(character.characterId, e)}
-        >
+        <div className="grid grid-cols-3 gap-1 p-1.5 rounded-sm bg-black/20 border border-white/10 content-start w-max">
           {slots.map((i, idx) =>
             i ? (
               <Tile
@@ -795,7 +1307,7 @@ export default function Inventory({ authed }: { authed: boolean }) {
             )
           )}
         </div>
-      </div>
+      </DropZone>
     );
   }
 
@@ -811,13 +1323,11 @@ export default function Inventory({ authed }: { authed: boolean }) {
     const items = [...(store?.carried[group.key] || []), ...(store?.equipped[group.key] || [])];
     const cellZone = `char:${character.characterId}:${group.key}`;
     return (
-      <div
-        onDragOver={(e) => allow(cellZone, e)}
-        onDragLeave={() => setHoverZone(null)}
-        onDrop={(e) => onDropMove(character.characterId, e)}
-        className={`flex flex-wrap gap-1 p-2 content-start min-h-[3.5rem] ${
-          hoverZone === cellZone ? "bg-blue-500/10 ring-1 ring-blue-400/40 rounded" : ""
-        }`}
+      <DropZone
+        id={cellZone}
+        data={{ kind: "move", toStore: character.characterId }}
+        className="flex flex-wrap gap-1 p-2 content-start min-h-[3.5rem] rounded"
+        overClassName="bg-blue-500/10 ring-1 ring-blue-400/40"
       >
         <div className="w-full text-[10px] uppercase tracking-wide text-white/45 mb-0.5">
           {group.label}{" "}
@@ -834,26 +1344,24 @@ export default function Inventory({ authed }: { authed: boolean }) {
         {items.length === 0 && (
           <div className={`box-border ${TILE_SIZE} border border-dashed border-white/10 bg-white/[0.02]`} />
         )}
-      </div>
+      </DropZone>
     );
   }
 
   function VaultCell({ group, isArmor }: { group: { key: string; label: string }; isArmor: boolean }) {
-    const items = vault[group.key] || [];
-    // Per-row vault zone so empty buckets still accept drops (DIM-like).
+    const items = sortInventoryItems(vault[group.key] || []);
     const zone = `vault:${group.key}`;
-    const dropProps = {
-      onDragOver: (e: DragEvent) => allow(zone, e),
-      onDragLeave: () => setHoverZone(null),
-      onDrop: (e: DragEvent) => onDropMove("vault", e),
-    };
-    const base = `p-2 pl-2 border-l border-white/10 min-w-0 min-h-[11.5rem] ${
-      hoverZone === zone ? "bg-blue-500/10 ring-1 ring-blue-400/40 rounded" : ""
-    }`;
+    const base = "p-2 pl-2 border-l border-white/10 min-w-0 min-h-[11.5rem] rounded";
+    const over = "bg-blue-500/10 ring-1 ring-blue-400/40";
 
     if (!isArmor) {
       return (
-        <div {...dropProps} className={`flex flex-wrap gap-1 content-start ${base}`}>
+        <DropZone
+          id={zone}
+          data={{ kind: "move", toStore: "vault" }}
+          className={`flex flex-wrap gap-1 content-start ${base}`}
+          overClassName={over}
+        >
           {items.map((i) => (
             <Tile
               key={(i.itemInstanceId || i.itemHash) + i.location}
@@ -867,19 +1375,25 @@ export default function Inventory({ authed }: { authed: boolean }) {
               Drop here
             </div>
           )}
-        </div>
+        </DropZone>
       );
     }
 
     const grouped: Record<string, Item[]> = {};
     for (const i of items) (grouped[i.classType] ||= []).push(i);
+    for (const cl of Object.keys(grouped)) grouped[cl] = sortInventoryItems(grouped[cl]);
     const classes = [
       ...classOrder.filter((cl) => (grouped[cl] || []).length > 0),
       ...Object.keys(grouped).filter((cl) => !classOrder.includes(cl) && grouped[cl].length),
     ];
 
     return (
-      <div {...dropProps} className={base}>
+      <DropZone
+        id={zone}
+        data={{ kind: "move", toStore: "vault" }}
+        className={base}
+        overClassName={over}
+      >
         <div className="space-y-1">
           {classes.map((cl) => (
             <div key={cl} className="flex items-start gap-1.5">
@@ -906,17 +1420,33 @@ export default function Inventory({ authed }: { authed: boolean }) {
             </div>
           ))}
         </div>
-      </div>
+      </DropZone>
     );
   }
 
   return (
+    <DndContext
+      sensors={sensors}
+      collisionDetection={pointerWithin}
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      onDragCancel={onDragCancel}
+    >
     <div>
       {/* Sticky search — outside any overflow-x container so it sticks to the viewport */}
       <div className="sticky top-14 z-30 -mx-4 lg:-mx-6 px-4 lg:px-6 py-2 mb-2 bg-[#0b0e14]/95 backdrop-blur border-b border-white/10">
         <div className="flex flex-wrap items-center gap-2 max-w-[1800px] mx-auto">
           <button onClick={load} className="px-3 py-1.5 rounded bg-white/10 hover:bg-white/20 text-sm shrink-0">
             {loading ? "Loading…" : "Reload"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setDupeOpen(true)}
+            disabled={!authed || loading}
+            className="px-3 py-1.5 rounded bg-exotic/90 text-black text-sm font-medium shrink-0 disabled:opacity-40"
+            title="Find duplicate weapons and armor for vault cleaning"
+          >
+            Vault cleaner
           </button>
           <div className="relative flex-1 min-w-[220px] max-w-xl">
             <svg
@@ -1010,6 +1540,15 @@ export default function Inventory({ authed }: { authed: boolean }) {
       )}
 
       {selected && <ItemDetailModal item={selected} onClose={() => setSelected(null)} />}
+      <VaultCleanPanel
+        open={dupeOpen}
+        onClose={() => setDupeOpen(false)}
+        onVaulted={() => load()}
+      />
     </div>
+    <DragOverlay dropAnimation={null}>
+      {activeItem ? <TileFace item={activeItem} ghost /> : null}
+    </DragOverlay>
+    </DndContext>
   );
 }

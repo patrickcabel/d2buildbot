@@ -50,8 +50,7 @@ async def _equip(instance_id: str, character_id: str, mtype: int):
 
 
 async def _load_items() -> list[dict]:
-    _, resp = await profile_svc.get_profile_raw()
-    return profile_svc.normalize_profile(resp)["items"]
+    return (await profile_svc.get_normalized_profile_cached())["items"]
 
 
 def _find(items: list[dict], instance_id: str) -> Optional[dict]:

@@ -4,6 +4,7 @@ import httpx
 from fastapi import APIRouter, HTTPException
 
 from ..builds import wishlist
+from ..bungie import profile as profile_svc
 
 router = APIRouter(prefix="/api/wishlists", tags=["wishlists"])
 
@@ -31,6 +32,7 @@ async def download_voltron() -> dict:
     target = wishlist.WISHLIST_DIR / "voltron.txt"
     target.write_text(content, encoding="utf-8")
     stats = wishlist.reload_wishlist()
+    profile_svc.invalidate_profile_cache()
     return {
         "ok": True,
         "bytes": len(content.encode("utf-8")),
@@ -42,4 +44,5 @@ async def download_voltron() -> dict:
 @router.post("/reload")
 async def reload() -> dict:
     wishlist.reload_wishlist()
+    profile_svc.invalidate_profile_cache()
     return wishlist.wishlist_stats()

@@ -31,17 +31,44 @@ class Wishlist:
         """Return best god-roll match info for an owned weapon instance."""
         rolls = self.rolls.get(item_hash)
         if not rolls:
-            return {"is_wishlisted": False, "matched_perks": 0, "notes": None}
+            return {
+                "is_wishlisted": False,
+                "matched_perks": 0,
+                "needed_perks": 0,
+                "notes": None,
+                "tier": "none",
+            }
         owned = set(owned_perks or [])
-        best = {"is_wishlisted": False, "matched_perks": 0, "notes": None}
+        best = {
+            "is_wishlisted": False,
+            "matched_perks": 0,
+            "needed_perks": 0,
+            "notes": None,
+            "tier": "none",
+        }
         for roll in rolls:
             if roll.undesirable or not roll.perks:
                 continue
+            needed = len(roll.perks)
             overlap = len(roll.perks & owned)
             if roll.perks.issubset(owned):
-                return {"is_wishlisted": True, "matched_perks": len(roll.perks), "notes": roll.notes}
+                return {
+                    "is_wishlisted": True,
+                    "matched_perks": needed,
+                    "needed_perks": needed,
+                    "notes": roll.notes or None,
+                    "tier": "god",
+                }
             if overlap > best["matched_perks"]:
-                best = {"is_wishlisted": False, "matched_perks": overlap, "notes": roll.notes}
+                # "near" = at least half the wishlist column perks, or 2+.
+                near = overlap >= max(2, (needed + 1) // 2)
+                best = {
+                    "is_wishlisted": False,
+                    "matched_perks": overlap,
+                    "needed_perks": needed,
+                    "notes": roll.notes or None,
+                    "tier": "near" if near else "partial",
+                }
         return best
 
 

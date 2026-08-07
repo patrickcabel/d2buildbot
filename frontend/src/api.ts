@@ -59,6 +59,14 @@ export interface Item {
   damageName?: string | null;
   power?: number | null;
   perks?: number[] | null;
+  wishlist?: {
+    is_wishlisted: boolean;
+    matched_perks: number;
+    needed_perks?: number;
+    notes: string | null;
+    tier?: "god" | "near" | "partial" | "none" | string;
+  } | null;
+  wishlistScore?: number;
 }
 
 export interface ItemDetailPlug {
@@ -252,6 +260,99 @@ export interface ArmorStatCaps {
   targets?: Record<string, number>;
 }
 
+export interface ArmorDupePlug {
+  hash: number;
+  name: string | null;
+  icon: string | null;
+  isEmpty?: boolean;
+}
+
+export interface ArmorDupePiece {
+  itemHash: number;
+  itemInstanceId: string;
+  name: string;
+  icon: string | null;
+  slot: string;
+  classType: string;
+  tier: string;
+  isExotic: boolean;
+  location: string;
+  characterId: string | null;
+  power: number | null;
+  isMasterwork: boolean;
+  rollStats: Record<string, number>;
+  liveStats: Record<string, number>;
+  archetype: ArmorDupePlug | null;
+  tuning: ArmorDupePlug | null;
+  artifice: ArmorDupePlug | null;
+}
+
+export interface ArmorDupeGroup {
+  classType: string;
+  slot: string;
+  rollStats: Record<string, number>;
+  archetype: ArmorDupePlug | null;
+  count: number;
+  tuningDiffers: boolean;
+  pieces: ArmorDupePiece[];
+}
+
+export interface ArmorDupeScan {
+  ok: boolean;
+  scanned: number;
+  groupCount: number;
+  groups: ArmorDupeGroup[];
+  statOrder: string[];
+}
+
+export interface WeaponDupePiece {
+  itemHash: number;
+  itemInstanceId: string;
+  name: string;
+  icon: string | null;
+  slot: string | null;
+  tier: string;
+  isExotic: boolean;
+  location: string;
+  characterId: string | null;
+  power: number | null;
+  isMasterwork: boolean;
+  damageIcon?: string | null;
+  damageName?: string | null;
+  wishlist: {
+    is_wishlisted: boolean;
+    matched_perks: number;
+    needed_perks: number;
+    notes: string | null;
+    tier: string;
+  };
+  wishlistScore: number;
+}
+
+export interface WeaponDupeGroup {
+  itemHash: number;
+  name: string;
+  icon: string | null;
+  slot: string | null;
+  count: number;
+  hasGodRoll: boolean;
+  wishlistDiffers: boolean;
+  pieces: WeaponDupePiece[];
+}
+
+export interface WeaponDupeScan {
+  ok: boolean;
+  scanned: number;
+  groupCount: number;
+  groups: WeaponDupeGroup[];
+}
+
+export interface VaultCleanScan {
+  ok: boolean;
+  armor: ArmorDupeScan;
+  weapons: WeaponDupeScan;
+}
+
 export const api = {
   authStatus: () => req<AuthStatus>("/api/auth/status"),
   loginUrl: () => `${API_ORIGIN}/api/auth/login`,
@@ -263,6 +364,8 @@ export const api = {
     }),
   profile: () => req<Profile>("/api/profile"),
   characters: () => req<{ characters: Character[] }>("/api/profile/characters"),
+  armorDupes: () => req<ArmorDupeScan>("/api/profile/armor-dupes"),
+  vaultClean: () => req<VaultCleanScan>("/api/profile/vault-clean"),
   itemDetail: (instanceId: string, itemHash?: number) =>
     req<ItemDetail>(
       `/api/profile/item/${instanceId}${itemHash != null ? `?itemHash=${itemHash}` : ""}`

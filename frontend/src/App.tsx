@@ -13,16 +13,13 @@ export default function App() {
   const [syncing, setSyncing] = useState(false);
 
   async function refresh() {
-    try {
-      setAuth(await api.authStatus());
-    } catch {
-      setAuth(null);
-    }
-    try {
-      setManifestVersion((await api.manifestStatus()).version);
-    } catch {
-      /* ignore */
-    }
+    const [authRes, manRes] = await Promise.allSettled([
+      api.authStatus(),
+      api.manifestStatus(),
+    ]);
+    if (authRes.status === "fulfilled") setAuth(authRes.value);
+    else setAuth(null);
+    if (manRes.status === "fulfilled") setManifestVersion(manRes.value.version);
   }
 
   useEffect(() => {

@@ -110,9 +110,11 @@ def list_exotic_armor(
             by_name[name] = r
 
     out = []
+    hashes = [int(r["hash"]) for r in by_name.values()]
+    defs = manifest.get_definitions("DestinyInventoryItemDefinition", hashes)
     for name, r in by_name.items():
         h = int(r["hash"])
-        d = manifest.get_item(h)
+        d = defs.get(h) or manifest.get_item(h)
         dp = (d or {}).get("displayProperties") or {}
         inv = (d or {}).get("inventory") or {}
         bucket = inv.get("bucketTypeHash")
@@ -140,9 +142,13 @@ def list_subclass_options(class_type: str, element: Optional[str] = None) -> dic
     aspects: list[dict] = []
     fragments: list[dict] = []
 
-    for r in manifest.all_names(["aspect", "fragment"]):
+    rows = list(manifest.all_names(["aspect", "fragment"]))
+    defs = manifest.get_definitions(
+        "DestinyInventoryItemDefinition", [int(r["hash"]) for r in rows]
+    )
+    for r in rows:
         h = int(r["hash"])
-        d = manifest.get_item(h)
+        d = defs.get(h)
         if not d:
             continue
         plug_cat = ((d.get("plug") or {}).get("plugCategoryIdentifier") or "").lower()

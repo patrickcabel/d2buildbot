@@ -49,10 +49,9 @@ async def create_build(body: BuildQuery) -> dict:
     if manifest.stored_version() is None:
         raise HTTPException(409, "Manifest not synced yet. Sync the manifest first.")
     try:
-        _, resp = await profile_svc.get_profile_raw()
+        profile = await profile_svc.get_normalized_profile_cached()
     except client.BungieError as exc:
         raise HTTPException(exc.status_code, str(exc)) from exc
-    profile = profile_svc.normalize_profile(resp)
     return engine.generate_build(
         query,
         profile,

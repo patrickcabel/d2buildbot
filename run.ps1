@@ -56,10 +56,18 @@ if ($Setup) {
 }
 
 # --- Launch ---
-Write-Host "Starting backend on http://localhost:8000 ..." -ForegroundColor Green
+$certsDir = Join-Path $backend "certs"
+$keyPem = Join-Path $certsDir "key.pem"
+$certPem = Join-Path $certsDir "cert.pem"
+if (-not ((Test-Path $keyPem) -and (Test-Path $certPem))) {
+    Write-Host "Generating self-signed HTTPS certs (required for Bungie OAuth)..." -ForegroundColor Yellow
+    & $venvPython (Join-Path $backend "make_cert.py")
+}
+
+Write-Host "Starting backend on https://127.0.0.1:8000 ..." -ForegroundColor Green
 Start-Process powershell -ArgumentList @(
     "-NoExit", "-Command",
-    "Set-Location '$backend'; & '$venvPython' -m uvicorn app.main:app --reload --port 8000"
+    "Set-Location '$backend'; & '$venvPython' -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --ssl-keyfile certs/key.pem --ssl-certfile certs/cert.pem --reload"
 )
 
 Write-Host "Starting frontend on http://localhost:5173 ..." -ForegroundColor Green
@@ -69,3 +77,4 @@ Start-Process powershell -ArgumentList @(
 )
 
 Write-Host "Both servers launching in separate windows. Open http://localhost:5173" -ForegroundColor Cyan
+Write-Host "API must be HTTPS on 8000 (Vite proxies /api there)." -ForegroundColor DarkGray

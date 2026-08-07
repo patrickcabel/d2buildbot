@@ -69,7 +69,7 @@ async def resolve_membership() -> dict:
 
 
 async def get_profile_raw() -> tuple[dict, dict]:
-    membership = await resolve_membership()
+    membership = await get_membership()
     resp = await client.get(
         f"/Destiny2/{membership['membership_type']}/Profile/{membership['membership_id']}/",
         params={"components": COMPONENTS},
@@ -78,13 +78,14 @@ async def get_profile_raw() -> tuple[dict, dict]:
     return membership, resp
 
 
-# Short-lived cache so armor caps / solve / exotic list don't each re-normalize (~30s).
-_profile_cache: Optional[tuple[float, dict, dict]] = None
-_PROFILE_CACHE_TTL = 45.0
+# Short-lived cache so inventory / caps / solve / dupes share one Bungie+normalize pass.
+# (ts, membership, normalized, raw)
+_profile_cache: Optional[tuple[float, dict, dict, dict]] = None
+_PROFILE_CACHE_TTL = 90.0
 
 
-async def get_normalized_profile_cached(force: bool = False) -> dict:
-    """Return normalize_profile(get_profile_raw()), cached briefly in memory."""
+async def get_profile_bundle_cached(force: bool = False) -> tuple[dict, dict, dict]:
+    """Return (membership, normalized, raw), cached briefly in memory."""
     import time
 
     global _profile_cache
@@ -94,12 +95,25 @@ async def get_normalized_profile_cached(force: bool = False) -> dict:
         and _profile_cache is not None
         and now - _profile_cache[0] < _PROFILE_CACHE_TTL
     ):
-        return _profile_cache[2]
+        return _profile_cache[1], _profile_cache[2], _profile_cache[3]
     membership, resp = await get_profile_raw()
-    normalized = normalize_profile(resp)
-    # Stash membership alongside for callers that need it via a side channel if needed.
-    _profile_cache = (now, membership, normalized)
+    # Normalize off the event loop — SQLite/JSON work is CPU-bound.
+    import asyncio
+
+    normalized = await asyncio.to_thread(normalize_profile, resp)
+    _profile_cache = (now, membership, normalized, resp)
+    return membership, normalized, resp
+
+
+async def get_normalized_profile_cached(force: bool = False) -> dict:
+    """Return normalize_profile(get_profile_raw()), cached briefly in memory."""
+    _membership, normalized, _raw = await get_profile_bundle_cached(force=force)
     return normalized
+
+
+async def get_profile_raw_cached(force: bool = False) -> tuple[dict, dict]:
+    membership, _normalized, raw = await get_profile_bundle_cached(force=force)
+    return membership, raw
 
 
 def invalidate_profile_cache() -> None:
@@ -111,6 +125,25 @@ def get_cached_membership() -> Optional[dict]:
     if _profile_cache is None:
         return None
     return _profile_cache[1]
+
+
+async def get_characters_fast() -> tuple[dict, list[dict]]:
+    """Character list without pulling inventory components when possible."""
+    import time
+
+    global _profile_cache
+    now = time.time()
+    if _profile_cache is not None and now - _profile_cache[0] < _PROFILE_CACHE_TTL:
+        return _profile_cache[1], _profile_cache[2].get("characters") or []
+
+    membership = await get_membership()
+    # 100 Profiles, 200 Characters — enough for class/light/emblem.
+    resp = await client.get(
+        f"/Destiny2/{membership['membership_type']}/Profile/{membership['membership_id']}/",
+        params={"components": "100,200"},
+        authed=True,
+    )
+    return membership, extract_characters(resp)
 
 
 def _bungie_icon(path: Optional[str]) -> Optional[str]:
@@ -312,6 +345,59 @@ def normalize_profile(resp: dict) -> dict:
     item_components = resp.get("itemComponents", {})
     characters = extract_characters(resp)
 
+    # Prefetch all item / plug / damage defs in a few SQLite queries instead of
+    # opening a connection per hash (dominant cost on large vaults).
+    item_hashes: set[int] = set()
+    plug_hashes: set[int] = set()
+    damage_hashes: set[int] = set()
+
+    def _collect(items: Optional[list]) -> None:
+        for it in items or []:
+            h = it.get("itemHash")
+            if h is not None:
+                try:
+                    item_hashes.add(int(h))
+                except (TypeError, ValueError):
+                    pass
+            o = it.get("overrideStyleItemHash")
+            if o is not None:
+                try:
+                    item_hashes.add(int(o))
+                except (TypeError, ValueError):
+                    pass
+
+    _collect(((resp.get("profileInventory") or {}).get("data") or {}).get("items"))
+    for block in ((resp.get("characterInventories") or {}).get("data") or {}).values():
+        _collect(block.get("items"))
+    for block in ((resp.get("characterEquipment") or {}).get("data") or {}).values():
+        _collect(block.get("items"))
+
+    sockets = ((item_components.get("sockets") or {}).get("data") or {})
+    for block in sockets.values():
+        for sock in (block or {}).get("sockets") or []:
+            ph = sock.get("plugHash")
+            if ph:
+                try:
+                    plug_hashes.add(int(ph))
+                except (TypeError, ValueError):
+                    pass
+
+    instances = ((item_components.get("instances") or {}).get("data") or {})
+    for inst in instances.values():
+        dh = inst.get("damageTypeHash")
+        if dh:
+            try:
+                damage_hashes.add(int(dh))
+            except (TypeError, ValueError):
+                pass
+
+    if item_hashes or plug_hashes:
+        manifest.get_definitions(
+            "DestinyInventoryItemDefinition", list(item_hashes | plug_hashes)
+        )
+    if damage_hashes:
+        manifest.get_definitions("DestinyDamageTypeDefinition", list(damage_hashes))
+
     items: list[dict] = []
 
     for it in (resp.get("profileInventory") or {}).get("data", {}).get("items", []):
@@ -332,6 +418,28 @@ def normalize_profile(resp: dict) -> dict:
             enriched = _enrich_item(it, "equipped", char_id, item_components)
             if enriched:
                 items.append(enriched)
+
+    # Attach wishlist / god-roll scores to weapons (voltron.txt etc.).
+    try:
+        from ..builds.wishlist import load_wishlist
+
+        wl = load_wishlist()
+        for item in items:
+            if item.get("kind") != "weapon":
+                continue
+            info = wl.score(item.get("itemHash"), item.get("perks") or [])
+            item["wishlist"] = info
+            # Sort key used by inventory UI: gods first, then near, then power.
+            tier_bonus = {"god": 1000, "near": 400, "partial": 100, "none": 0}.get(
+                info.get("tier") or "none", 0
+            )
+            item["wishlistScore"] = (
+                tier_bonus
+                + int(info.get("matched_perks") or 0) * 10
+                + (item.get("power") or 0) / 1000.0
+            )
+    except Exception:  # noqa: BLE001 — wishlist optional
+        pass
 
     return {"characters": characters, "items": items}
 
