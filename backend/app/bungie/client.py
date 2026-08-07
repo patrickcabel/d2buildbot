@@ -45,6 +45,30 @@ async def get(path: str, *, params: Optional[dict] = None, authed: bool = False)
     return payload.get("Response")
 
 
+async def post(path: str, *, json: Optional[dict] = None, authed: bool = True) -> Any:
+    """POST to a Platform endpoint and unwrap the standard Bungie response envelope."""
+    url = path if path.startswith("http") else f"{API_ROOT}{path}"
+    headers = await _headers(authed)
+    headers["Content-Type"] = "application/json"
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(url, headers=headers, json=json)
+    if resp.status_code >= 400:
+        # Try to surface Bungie's structured error message.
+        try:
+            payload = resp.json()
+            msg = payload.get("Message") or resp.text[:300]
+        except Exception:  # noqa: BLE001
+            msg = resp.text[:300]
+        raise BungieError(f"Bungie API error {resp.status_code}: {msg}", resp.status_code)
+    payload = resp.json()
+    if payload.get("ErrorCode", 1) != 1:
+        raise BungieError(
+            f"{payload.get('ErrorStatus')}: {payload.get('Message')}",
+            400,
+        )
+    return payload.get("Response")
+
+
 async def get_raw(url: str) -> bytes:
     """Fetch a raw asset (e.g. a manifest content file) from bungie.net."""
     full = url if url.startswith("http") else f"{BUNGIE_ROOT}{url}"

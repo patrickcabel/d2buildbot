@@ -5,6 +5,7 @@ __pycache__/
 venv/
 backend/.env
 backend/.secret_key
+backend/certs/
 backend/data/*.db
 backend/data/*.db-wal
 backend/data/*.db-shm

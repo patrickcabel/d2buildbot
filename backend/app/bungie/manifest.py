@@ -16,6 +16,7 @@ NEEDED_TABLES = [
     "DestinyInventoryBucketDefinition",
     "DestinyPlugSetDefinition",
     "DestinyItemCategoryDefinition",
+    "DestinySocketCategoryDefinition",
 ]
 
 # DestinyItemType enum values we care about.
@@ -65,48 +66,69 @@ def _classify(item: dict) -> Optional[str]:
     return None
 
 
+def _missing_tables() -> list[str]:
+    """Needed tables that have no rows cached (e.g. newly added to NEEDED_TABLES)."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT table_name, COUNT(*) AS n FROM manifest_defs GROUP BY table_name"
+        ).fetchall()
+    present = {r["table_name"] for r in rows if r["n"] > 0}
+    return [t for t in NEEDED_TABLES if t not in present]
+
+
 async def sync_manifest(force: bool = False) -> dict:
     """Download and cache needed definition tables if the version changed."""
+    import time
+
     meta = await get_manifest_meta()
     version = meta["version"]
-    if not force and stored_version() == version:
+    if not force and stored_version() == version and not _missing_tables():
         return {"status": "up-to-date", "version": version}
 
     paths = meta["jsonWorldComponentContentPaths"]["en"]
+
+    # Download + parse outside any DB lock so inventory/auth requests aren't blocked
+    # for minutes (holding the lock during network I/O was wedging the server).
+    prepared: list[tuple[str, list[tuple], list[tuple]]] = []
+    for table in NEEDED_TABLES:
+        rel = paths.get(table)
+        if not rel:
+            continue
+        content = await client.get_raw(rel)
+        data = json.loads(content)
+        rows: list[tuple] = []
+        name_rows: list[tuple] = []
+        for hash_str, definition in data.items():
+            try:
+                h = int(hash_str)
+            except ValueError:
+                continue
+            rows.append((table, h, json.dumps(definition)))
+            if table == "DestinyInventoryItemDefinition":
+                name = (definition.get("displayProperties") or {}).get("name") or ""
+                if not name or definition.get("redacted"):
+                    continue
+                entity = _classify(definition)
+                if entity is None:
+                    continue
+                tier = (definition.get("inventory") or {}).get("tierType", 0)
+                is_exotic = 1 if tier == 6 else 0
+                class_type = definition.get("classType", 3)
+                name_rows.append(
+                    (h, name, _normalize(name), entity, is_exotic, class_type)
+                )
+        prepared.append((table, rows, name_rows))
+
     with db() as conn:
         conn.execute("DELETE FROM manifest_defs")
         conn.execute("DELETE FROM name_index")
-        for table in NEEDED_TABLES:
-            rel = paths.get(table)
-            if not rel:
-                continue
-            content = await client.get_raw(rel)
-            data = json.loads(content)
-            rows = []
-            name_rows = []
-            for hash_str, definition in data.items():
-                try:
-                    h = int(hash_str)
-                except ValueError:
-                    continue
-                rows.append((table, h, json.dumps(definition)))
-                if table == "DestinyInventoryItemDefinition":
-                    name = (definition.get("displayProperties") or {}).get("name") or ""
-                    if not name or definition.get("redacted"):
-                        continue
-                    entity = _classify(definition)
-                    if entity is None:
-                        continue
-                    tier = (definition.get("inventory") or {}).get("tierType", 0)
-                    is_exotic = 1 if tier == 6 else 0
-                    class_type = definition.get("classType", 3)
-                    name_rows.append(
-                        (h, name, _normalize(name), entity, is_exotic, class_type)
-                    )
-            conn.executemany(
-                "INSERT OR REPLACE INTO manifest_defs (table_name, hash, json) VALUES (?, ?, ?)",
-                rows,
-            )
+        for _table, rows, name_rows in prepared:
+            if rows:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO manifest_defs (table_name, hash, json) "
+                    "VALUES (?, ?, ?)",
+                    rows,
+                )
             if name_rows:
                 conn.executemany(
                     "INSERT OR REPLACE INTO name_index "
@@ -114,8 +136,6 @@ async def sync_manifest(force: bool = False) -> dict:
                     "VALUES (?, ?, ?, ?, ?, ?)",
                     name_rows,
                 )
-        import time
-
         conn.execute(
             "INSERT INTO manifest_meta (id, version, updated_at) VALUES (1, ?, ?) "
             "ON CONFLICT(id) DO UPDATE SET version=excluded.version, updated_at=excluded.updated_at",

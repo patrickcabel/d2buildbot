@@ -30,3 +30,26 @@ async def get_profile() -> dict:
         raise HTTPException(exc.status_code, str(exc)) from exc
     normalized = profile_svc.normalize_profile(resp)
     return {"membership": membership, **normalized}
+
+
+@router.get("/profile/characters")
+async def get_characters() -> dict:
+    """Fast character list for build filters (skips full inventory enrich)."""
+    try:
+        membership, resp = await profile_svc.get_profile_raw()
+    except client.BungieError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+    return {
+        "membership": membership,
+        "characters": profile_svc.extract_characters(resp),
+    }
+
+
+@router.get("/profile/item/{instance_id}")
+async def get_item_detail(instance_id: str, itemHash: int | None = None) -> dict:
+    if manifest.stored_version() is None:
+        raise HTTPException(409, "Manifest not synced yet. Call /api/manifest/sync first.")
+    try:
+        return await profile_svc.get_item_detail(instance_id, item_hash=itemHash)
+    except client.BungieError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc

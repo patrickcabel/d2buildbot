@@ -49,10 +49,10 @@ export default function App() {
 
   return (
     <div className="min-h-screen">
-      <header className="border-b border-white/10 bg-black/30 sticky top-0 z-10 backdrop-blur">
-        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center gap-4">
+      <header className="border-b border-white/10 bg-[#0b0e14]/95 sticky top-0 z-40 backdrop-blur">
+        <div className="max-w-[1800px] mx-auto px-4 lg:px-6 py-3 flex flex-wrap items-center gap-x-4 gap-y-2">
           <h1 className="text-lg font-bold text-exotic">D2 Build Maker</h1>
-          <nav className="flex gap-1">
+          <nav className="flex gap-1 flex-wrap">
             {tabs.map((t) => (
               <button
                 key={t.id}
@@ -98,7 +98,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-4 py-6">
+      <main className="max-w-[1800px] mx-auto px-4 lg:px-6 py-6">
         {auth && !auth.configured && (
           <div className="mb-4 p-3 rounded bg-yellow-500/10 border border-yellow-500/30 text-yellow-200 text-sm">
             Bungie API credentials are not configured. Fill in <code>backend/.env</code> and restart
