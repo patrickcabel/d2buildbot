@@ -102,6 +102,10 @@ Open http://localhost:5173.
 3. It scans your inventory to fill weapon slots (scored by wishlist god rolls + reference
    recommendations) and armor slots (by class and power), and flags anything you don't own.
 
+## Host on Oracle Cloud (free, more RAM)
+
+Render’s free tier is only 512 MB and often 502s on inventory. For a free VM with **12–24 GB RAM**, see **[deploy/oracle/README.md](deploy/oracle/README.md)** (Docker Compose + Caddy HTTPS).
+
 ## Host on Render (free)
 
 One Docker service serves the API and the built React UI over HTTPS.

@@ -1,0 +1,8 @@
+# Automatic HTTPS via Let's Encrypt.
+# DOMAIN examples:
+#   your.name.sslip.io   (free — replace with your public IP: 130-162-1-2.sslip.io)
+#   d2.example.com       (if you point a DNS A record at this VM)
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy app:8000
+}
