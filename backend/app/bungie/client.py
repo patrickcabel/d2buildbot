@@ -85,5 +85,25 @@ async def get_raw(url: str) -> bytes:
     return resp.content
 
 
+async def download_to_file(url: str, dest_path: str, *, on_progress=None) -> int:
+    """Stream a large Bungie asset to disk (keeps RAM flat on free hosts)."""
+    from pathlib import Path
+
+    full = url if url.startswith("http") else f"{BUNGIE_ROOT}{url}"
+    path = Path(dest_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    async with _client().stream("GET", full, timeout=httpx.Timeout(600.0, connect=30.0)) as resp:
+        if resp.status_code >= 400:
+            raise BungieError(f"Failed to fetch {full}: {resp.status_code}", resp.status_code)
+        with path.open("wb") as out:
+            async for chunk in resp.aiter_bytes(chunk_size=256 * 1024):
+                out.write(chunk)
+                written += len(chunk)
+                if on_progress and written % (5 * 1024 * 1024) < 256 * 1024:
+                    on_progress(written)
+    return written
+
+
 async def get_current_user_memberships() -> Any:
     return await get("/User/GetMembershipsForCurrentUser/", authed=True)

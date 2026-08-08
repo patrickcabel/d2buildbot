@@ -153,8 +153,154 @@ def _set_version(version: str) -> None:
         )
 
 
+def _signed_id_to_hash(signed_id: int) -> int:
+    """SQLite stores hashes as signed 32-bit ints; convert to unsigned."""
+    h = int(signed_id)
+    return h + (1 << 32) if h < 0 else h
+
+
+def _name_row_from_item(h: int, definition: dict) -> Optional[tuple]:
+    name = (definition.get("displayProperties") or {}).get("name") or ""
+    if not name or definition.get("redacted"):
+        return None
+    entity = _classify(definition)
+    if entity is None:
+        return None
+    tier = (definition.get("inventory") or {}).get("tierType", 0)
+    is_exotic = 1 if tier == 6 else 0
+    class_type = definition.get("classType", 3)
+    return (h, name, _normalize(name), entity, is_exotic, class_type)
+
+
+def _import_mobile_sqlite(sqlite_path: str, tables: list[str], *, full: bool) -> None:
+    """Copy definition tables from Bungie's mobile SQLite into our app DB (low RAM)."""
+    import sqlite3
+    from pathlib import Path
+
+    src_path = Path(sqlite_path)
+    src = sqlite3.connect(f"file:{src_path.as_posix()}?mode=ro", uri=True)
+    src.row_factory = sqlite3.Row
+    try:
+        existing = {
+            r[0]
+            for r in src.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        with db() as dest:
+            if full:
+                dest.execute("DELETE FROM manifest_defs")
+                dest.execute("DELETE FROM name_index")
+            for i, table in enumerate(tables):
+                if table not in existing:
+                    continue
+                _sync_state.update(
+                    {
+                        "progress": f"Importing {table}…",
+                        "table": table,
+                        "tableIndex": i + 1,
+                        "tableCount": len(tables),
+                    }
+                )
+                if not full:
+                    dest.execute("DELETE FROM manifest_defs WHERE table_name = ?", (table,))
+                batch_defs: list[tuple] = []
+                batch_names: list[tuple] = []
+                for row in src.execute(f'SELECT id, json FROM "{table}"'):  # noqa: S608
+                    h = _signed_id_to_hash(row["id"])
+                    raw = row["json"]
+                    if isinstance(raw, bytes):
+                        raw = raw.decode("utf-8")
+                    batch_defs.append((table, h, raw))
+                    if table == "DestinyInventoryItemDefinition":
+                        try:
+                            definition = json.loads(raw)
+                        except json.JSONDecodeError:
+                            definition = None
+                        if definition:
+                            nr = _name_row_from_item(h, definition)
+                            if nr:
+                                batch_names.append(nr)
+                    if len(batch_defs) >= 500:
+                        dest.executemany(
+                            "INSERT OR REPLACE INTO manifest_defs (table_name, hash, json) "
+                            "VALUES (?, ?, ?)",
+                            batch_defs,
+                        )
+                        if batch_names:
+                            dest.executemany(
+                                "INSERT OR REPLACE INTO name_index "
+                                "(hash, name, normalized, entity_type, is_exotic, class_type) "
+                                "VALUES (?, ?, ?, ?, ?, ?)",
+                                batch_names,
+                            )
+                        batch_defs.clear()
+                        batch_names.clear()
+                if batch_defs:
+                    dest.executemany(
+                        "INSERT OR REPLACE INTO manifest_defs (table_name, hash, json) "
+                        "VALUES (?, ?, ?)",
+                        batch_defs,
+                    )
+                if batch_names:
+                    dest.executemany(
+                        "INSERT OR REPLACE INTO name_index "
+                        "(hash, name, normalized, entity_type, is_exotic, class_type) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        batch_names,
+                    )
+    finally:
+        src.close()
+
+
+async def _sync_via_mobile_sqlite(version: str, mobile_path: str, tables: list[str], *, full: bool) -> None:
+    """Stream Bungie's zipped SQLite manifest to disk, then import needed tables."""
+    import gc
+    import tempfile
+    import zipfile
+    from pathlib import Path
+
+    tmp = Path(tempfile.mkdtemp(prefix="d2manifest_"))
+    zip_path = tmp / "world.content.zip"
+    try:
+        _sync_state["progress"] = "Downloading SQLite manifest…"
+
+        def _prog(n: int) -> None:
+            mb = n / (1024 * 1024)
+            _sync_state["progress"] = f"Downloading SQLite manifest… {mb:.0f} MB"
+
+        await client.download_to_file(mobile_path, str(zip_path), on_progress=_prog)
+        _sync_state["progress"] = "Extracting SQLite manifest…"
+
+        def _extract() -> str:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                names = zf.namelist()
+                if not names:
+                    raise RuntimeError("Empty manifest zip")
+                zf.extract(names[0], path=tmp)
+                return str(tmp / names[0])
+
+        sqlite_file = await asyncio.to_thread(_extract)
+        # Free zip bytes on disk ASAP.
+        try:
+            zip_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        gc.collect()
+
+        await asyncio.to_thread(_import_mobile_sqlite, sqlite_file, tables, full=full)
+        await asyncio.to_thread(_set_version, version)
+        clear_definition_cache()
+    finally:
+        import shutil
+
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 async def _sync_tables(version: str, paths: dict, tables: list[str], *, full: bool) -> None:
-    """Download + write one table at a time to limit peak RAM on free hosts."""
+    """JSON-component fallback (higher RAM) — one table at a time."""
+    import gc
+
     for i, table in enumerate(tables):
         _sync_state.update(
             {
@@ -177,8 +323,6 @@ async def _sync_tables(version: str, paths: dict, tables: list[str], *, full: bo
         wipe = full and i == 0
         await asyncio.to_thread(_write_table, table, rows, name_rows, wipe=wipe)
         del rows, name_rows
-        import gc
-
         gc.collect()
 
     await asyncio.to_thread(_set_version, version)
@@ -209,10 +353,16 @@ async def _run_sync(force: bool) -> None:
             )
             return
 
-        paths = meta["jsonWorldComponentContentPaths"]["en"]
         full = force or stored_version() != version
         tables = list(NEEDED_TABLES) if full else missing
-        await _sync_tables(version, paths, tables, full=full)
+
+        mobile = (meta.get("mobileWorldContentPaths") or {}).get("en")
+        if mobile:
+            await _sync_via_mobile_sqlite(version, mobile, tables, full=full)
+        else:
+            paths = meta["jsonWorldComponentContentPaths"]["en"]
+            await _sync_tables(version, paths, tables, full=full)
+
         _sync_state.update(
             {
                 "status": "synced",
