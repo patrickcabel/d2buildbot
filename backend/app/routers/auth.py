@@ -42,7 +42,7 @@ async def callback(code: str = Query(...), state: str = Query(...)) -> RedirectR
         await auth.exchange_code_for_token(code)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(502, f"Token exchange failed: {exc}") from exc
-    return RedirectResponse(f"{settings.frontend_origin}/?login=success")
+    return RedirectResponse(f"{settings.resolved_frontend_origin}/?login=success")
 
 
 @router.post("/logout")

@@ -1,0 +1,25 @@
+# Free-tier Render Blueprint: https://dashboard.render.com/blueprints
+# After first deploy, copy the service URL into your Bungie app Redirect URL:
+#   https://YOUR-SERVICE.onrender.com/api/auth/callback
+services:
+  - type: web
+    name: d2buildbot
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: BUNGIE_API_KEY
+        sync: false
+      - key: BUNGIE_CLIENT_ID
+        sync: false
+      - key: BUNGIE_CLIENT_SECRET
+        sync: false
+      - key: YOUTUBE_API_KEY
+        sync: false
+      - key: TOKEN_ENCRYPTION_KEY
+        generateValue: true
+      # Optional overrides — leave unset to use RENDER_EXTERNAL_URL automatically.
+      - key: BUNGIE_REDIRECT_URI
+        sync: false
+      - key: FRONTEND_ORIGIN
+        sync: false

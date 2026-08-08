@@ -51,7 +51,7 @@ async def exchange_code_for_token(code: str) -> None:
     data = {
         "grant_type": "authorization_code",
         "code": code,
-        "redirect_uri": settings.bungie_redirect_uri,
+        "redirect_uri": settings.resolved_bungie_redirect_uri,
     }
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(TOKEN_URL, headers=headers, data=data)

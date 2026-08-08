@@ -1,6 +1,9 @@
-// Dev: same-origin `/api` via Vite proxy (avoids self-signed HTTPS fetch failures).
-// OAuth login still hits the HTTPS backend directly (Bungie redirect URI).
-const API_ORIGIN = "https://localhost:8000";
+// Dev: Vite proxies `/api` → local HTTPS backend; login still uses API_ORIGIN.
+// Prod (Render): empty VITE_API_ORIGIN → same-origin `/api` + `/api/auth/login`.
+const API_ORIGIN =
+  import.meta.env.VITE_API_ORIGIN !== undefined
+    ? String(import.meta.env.VITE_API_ORIGIN)
+    : "https://localhost:8000";
 const BASE = import.meta.env.VITE_API_BASE ?? "";
 
 async function req<T>(path: string, options?: RequestInit): Promise<T> {

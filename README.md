@@ -40,8 +40,10 @@ credentials and re-run. The manual steps are below if you prefer them.
 2. Set **OAuth Client Type** to **Confidential**.
 3. Set the **Redirect URL** to exactly:
    ```
-   http://localhost:8000/api/auth/callback
+   https://localhost:8000/api/auth/callback
    ```
+   (Local HTTPS via `make_cert.py`. For Render hosting, use your
+   `https://YOUR-SERVICE.onrender.com/api/auth/callback` URL instead — or add both.)
 4. Note your **API Key**, **OAuth client_id**, and **OAuth client_secret**.
 
 ## 2. (Optional) YouTube Data API key
@@ -99,6 +101,27 @@ Open http://localhost:5173.
    sources mention them.
 3. It scans your inventory to fill weapon slots (scored by wishlist god rolls + reference
    recommendations) and armor slots (by class and power), and flags anything you don't own.
+
+## Host on Render (free)
+
+One Docker service serves the API and the built React UI over HTTPS.
+
+1. Push this repo to GitHub (already connected if you use `patrickcabel/d2buildbot`).
+2. Open [Render Blueprints](https://dashboard.render.com/blueprints) → **New Blueprint Instance** → select this repo (`render.yaml`).
+   Or: **New → Web Service** → connect the repo → Runtime **Docker** → instance type **Free**.
+3. Set these environment variables (Blueprint prompts for `sync: false` ones):
+   - `BUNGIE_API_KEY`
+   - `BUNGIE_CLIENT_ID`
+   - `BUNGIE_CLIENT_SECRET`
+   - Leave `BUNGIE_REDIRECT_URI` / `FRONTEND_ORIGIN` blank (auto from `RENDER_EXTERNAL_URL`).
+4. Deploy, then copy your public URL (e.g. `https://d2buildbot.onrender.com`).
+5. In [Bungie Applications](https://www.bungie.net/en/Application), set **Redirect URL** to:
+   ```
+   https://YOUR-SERVICE.onrender.com/api/auth/callback
+   ```
+6. Open the Render URL → **Login with Bungie** → **Sync Manifest**.
+
+**Free-tier caveats:** the service sleeps after ~15 minutes idle (cold start ~30–60s). Disk is ephemeral, so login + manifest may need a refresh after sleep. 512 MB RAM is tight for a full manifest sync — if sync fails, retry once the service is warm.
 
 ## Extending
 
