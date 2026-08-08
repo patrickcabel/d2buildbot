@@ -4,7 +4,6 @@
 **/*.pyc
 **/.venv
 **/node_modules
-**/dist
 frontend/dist
 backend/.env
 backend/.secret_key
