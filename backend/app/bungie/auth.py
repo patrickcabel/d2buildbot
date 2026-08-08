@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import secrets
+import time
 from typing import Optional
 from urllib.parse import urlencode
 
@@ -13,27 +16,53 @@ from . import tokens
 AUTHORIZE_URL = "https://www.bungie.net/en/OAuth/Authorize"
 TOKEN_URL = "https://www.bungie.net/Platform/App/OAuth/Token/"
 
-# In-memory CSRF state store (single-user, local app).
-_pending_states: set[str] = set()
+# Signed OAuth `state` lifetime (Render free tier can restart between login + callback).
+_STATE_MAX_AGE_SEC = 15 * 60
+
+
+def _state_secret() -> bytes:
+    return get_settings().fernet_key
+
+
+def _make_state() -> str:
+    """Stateless CSRF token: nonce.timestamp.signature (survives restarts/workers)."""
+    nonce = secrets.token_urlsafe(16)
+    ts = str(int(time.time()))
+    payload = f"{nonce}.{ts}".encode()
+    sig = hmac.new(_state_secret(), payload, hashlib.sha256).digest()
+    return f"{nonce}.{ts}.{base64.urlsafe_b64encode(sig).decode().rstrip('=')}"
+
+
+def consume_state(state: str) -> bool:
+    parts = (state or "").split(".")
+    if len(parts) != 3:
+        return False
+    nonce, ts_str, sig_b64 = parts
+    try:
+        ts = int(ts_str)
+    except ValueError:
+        return False
+    if abs(time.time() - ts) > _STATE_MAX_AGE_SEC:
+        return False
+    payload = f"{nonce}.{ts_str}".encode()
+    expected = hmac.new(_state_secret(), payload, hashlib.sha256).digest()
+    # Pad for urlsafe_b64decode.
+    pad = "=" * (-len(sig_b64) % 4)
+    try:
+        got = base64.urlsafe_b64decode(sig_b64 + pad)
+    except Exception:  # noqa: BLE001
+        return False
+    return hmac.compare_digest(expected, got)
 
 
 def build_authorize_url() -> str:
     settings = get_settings()
-    state = secrets.token_urlsafe(24)
-    _pending_states.add(state)
     params = {
         "client_id": settings.bungie_client_id,
         "response_type": "code",
-        "state": state,
+        "state": _make_state(),
     }
     return f"{AUTHORIZE_URL}?{urlencode(params)}"
-
-
-def consume_state(state: str) -> bool:
-    if state in _pending_states:
-        _pending_states.discard(state)
-        return True
-    return False
 
 
 def _basic_auth_header() -> dict[str, str]:
