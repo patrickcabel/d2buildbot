@@ -1,5 +1,5 @@
 # Free-tier Render Blueprint: https://dashboard.render.com/blueprints
-# After first deploy, copy the service URL into your Bungie app Redirect URL:
+# After first deploy, set your Bungie app Redirect URL to:
 #   https://YOUR-SERVICE.onrender.com/api/auth/callback
 services:
   - type: web
@@ -14,12 +14,5 @@ services:
         sync: false
       - key: BUNGIE_CLIENT_SECRET
         sync: false
-      - key: YOUTUBE_API_KEY
-        sync: false
       - key: TOKEN_ENCRYPTION_KEY
         generateValue: true
-      # Optional overrides — leave unset to use RENDER_EXTERNAL_URL automatically.
-      - key: BUNGIE_REDIRECT_URI
-        sync: false
-      - key: FRONTEND_ORIGIN
-        sync: false
