@@ -38,6 +38,13 @@ async def get_profile() -> dict:
         membership, normalized, _raw = await profile_svc.get_profile_bundle_cached()
     except client.BungieError as exc:
         raise HTTPException(exc.status_code, str(exc)) from exc
+    except MemoryError as exc:
+        raise HTTPException(
+            503,
+            "Server out of memory loading inventory (free host limit). Retry once, or use a smaller vault.",
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"Profile failed: {exc}") from exc
     return {"membership": membership, **normalized}
 
 

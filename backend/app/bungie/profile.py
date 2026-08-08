@@ -6,7 +6,10 @@ from ..session import get_session_id
 from . import client, manifest
 
 # GetProfile components (numeric).
-COMPONENTS = "100,102,200,201,205,300,302,304,305,310"
+# Inventory list: skip reusable plugs (310) and perks (302) — sockets cover plugs.
+COMPONENTS = "100,102,200,201,205,300,304,305"
+# Armor dupe / vault-clean need live stats + sockets (+ reusable for edge cases).
+COMPONENTS_FULL = "100,102,200,201,205,300,302,304,305,310"
 
 # Well-known bucket hashes.
 BUCKET_KINETIC = 1498876634
@@ -75,24 +78,26 @@ async def resolve_membership() -> dict:
     }
 
 
-async def get_profile_raw() -> tuple[dict, dict]:
+async def get_profile_raw(*, full: bool = False) -> tuple[dict, dict]:
     membership = await get_membership()
+    components = COMPONENTS_FULL if full else COMPONENTS
     resp = await client.get(
         f"/Destiny2/{membership['membership_type']}/Profile/{membership['membership_id']}/",
-        params={"components": COMPONENTS},
+        params={"components": components},
         authed=True,
     )
     return membership, resp
 
 
-# Short-lived cache so inventory / caps / solve / dupes share one Bungie+normalize pass.
-# session_id -> (ts, membership, normalized, raw)
-_profile_cache: dict[str, tuple[float, dict, dict, dict]] = {}
+# Short-lived cache so inventory / caps / solve share one normalize pass.
+# session_id -> (ts, membership, normalized)  — never retain raw GetProfile (OOM on free tier).
+_profile_cache: dict[str, tuple[float, dict, dict]] = {}
 _PROFILE_CACHE_TTL = 90.0
 
 
 async def get_profile_bundle_cached(force: bool = False) -> tuple[dict, dict, dict]:
-    """Return (membership, normalized, raw), cached briefly in memory per session."""
+    """Return (membership, normalized, raw). Raw is only present on a fresh fetch."""
+    import gc
     import time
 
     key = _cache_key()
@@ -101,13 +106,16 @@ async def get_profile_bundle_cached(force: bool = False) -> tuple[dict, dict, di
     now = time.time()
     cached = _profile_cache.get(key)
     if not force and cached is not None and now - cached[0] < _PROFILE_CACHE_TTL:
-        return cached[1], cached[2], cached[3]
-    membership, resp = await get_profile_raw()
+        return cached[1], cached[2], {}
+    membership, resp = await get_profile_raw(full=False)
     # Normalize off the event loop — SQLite/JSON work is CPU-bound.
     import asyncio
 
     normalized = await asyncio.to_thread(normalize_profile, resp)
-    _profile_cache[key] = (now, membership, normalized, resp)
+    manifest.clear_definition_cache()
+    gc.collect()
+    _profile_cache[key] = (now, membership, normalized)
+    # Return raw once for callers that need it; do not retain in cache.
     return membership, normalized, resp
 
 
@@ -118,8 +126,8 @@ async def get_normalized_profile_cached(force: bool = False) -> dict:
 
 
 async def get_profile_raw_cached(force: bool = False) -> tuple[dict, dict]:
-    membership, _normalized, raw = await get_profile_bundle_cached(force=force)
-    return membership, raw
+    """Fresh full GetProfile for dupe scanners (not served from the light inventory cache)."""
+    return await get_profile_raw(full=True)
 
 
 def invalidate_profile_cache(session_id: Optional[str] = None) -> None:
@@ -370,17 +378,33 @@ def extract_characters(resp: dict) -> list[dict]:
 
 
 def normalize_profile(resp: dict) -> dict:
+    import gc
+
     item_components = resp.get("itemComponents", {})
     characters = extract_characters(resp)
 
-    # Prefetch all item / plug / damage defs in a few SQLite queries instead of
-    # opening a connection per hash (dominant cost on large vaults).
-    item_hashes: set[int] = set()
-    plug_hashes: set[int] = set()
-    damage_hashes: set[int] = set()
+    pending: list[tuple[dict, str, Optional[str]]] = []
+    for it in ((resp.get("profileInventory") or {}).get("data") or {}).get("items") or []:
+        pending.append((it, "vault", None))
+    for char_id, block in ((resp.get("characterInventories") or {}).get("data") or {}).items():
+        for it in block.get("items") or []:
+            pending.append((it, "character", char_id))
+    for char_id, block in ((resp.get("characterEquipment") or {}).get("data") or {}).items():
+        for it in block.get("items") or []:
+            pending.append((it, "equipped", char_id))
 
-    def _collect(items: Optional[list]) -> None:
-        for it in items or []:
+    sockets = ((item_components.get("sockets") or {}).get("data") or {})
+    instances = ((item_components.get("instances") or {}).get("data") or {})
+
+    items: list[dict] = []
+    batch_size = 100
+    for start in range(0, len(pending), batch_size):
+        chunk = pending[start : start + batch_size]
+        item_hashes: set[int] = set()
+        plug_hashes: set[int] = set()
+        damage_hashes: set[int] = set()
+
+        for it, _loc, _cid in chunk:
             h = it.get("itemHash")
             if h is not None:
                 try:
@@ -393,59 +417,40 @@ def normalize_profile(resp: dict) -> dict:
                     item_hashes.add(int(o))
                 except (TypeError, ValueError):
                     pass
-
-    _collect(((resp.get("profileInventory") or {}).get("data") or {}).get("items"))
-    for block in ((resp.get("characterInventories") or {}).get("data") or {}).values():
-        _collect(block.get("items"))
-    for block in ((resp.get("characterEquipment") or {}).get("data") or {}).values():
-        _collect(block.get("items"))
-
-    sockets = ((item_components.get("sockets") or {}).get("data") or {})
-    for block in sockets.values():
-        for sock in (block or {}).get("sockets") or []:
-            ph = sock.get("plugHash")
-            if ph:
+            iid = it.get("itemInstanceId")
+            if not iid:
+                continue
+            for sock in (sockets.get(iid) or {}).get("sockets") or []:
+                ph = sock.get("plugHash")
+                if ph:
+                    try:
+                        plug_hashes.add(int(ph))
+                    except (TypeError, ValueError):
+                        pass
+            inst = instances.get(iid) or {}
+            dh = inst.get("damageTypeHash")
+            if dh:
                 try:
-                    plug_hashes.add(int(ph))
+                    damage_hashes.add(int(dh))
                 except (TypeError, ValueError):
                     pass
 
-    instances = ((item_components.get("instances") or {}).get("data") or {})
-    for inst in instances.values():
-        dh = inst.get("damageTypeHash")
-        if dh:
-            try:
-                damage_hashes.add(int(dh))
-            except (TypeError, ValueError):
-                pass
+        # Drop previous batch defs so free-tier RAM stays bounded.
+        manifest.clear_definition_cache()
+        if item_hashes or plug_hashes:
+            manifest.get_definitions(
+                "DestinyInventoryItemDefinition", list(item_hashes | plug_hashes)
+            )
+        if damage_hashes:
+            manifest.get_definitions("DestinyDamageTypeDefinition", list(damage_hashes))
 
-    if item_hashes or plug_hashes:
-        manifest.get_definitions(
-            "DestinyInventoryItemDefinition", list(item_hashes | plug_hashes)
-        )
-    if damage_hashes:
-        manifest.get_definitions("DestinyDamageTypeDefinition", list(damage_hashes))
-
-    items: list[dict] = []
-
-    for it in (resp.get("profileInventory") or {}).get("data", {}).get("items", []):
-        enriched = _enrich_item(it, "vault", None, item_components)
-        if enriched:
-            items.append(enriched)
-
-    char_inv = (resp.get("characterInventories") or {}).get("data", {})
-    for char_id, block in char_inv.items():
-        for it in block.get("items", []):
-            enriched = _enrich_item(it, "character", char_id, item_components)
+        for it, loc, cid in chunk:
+            enriched = _enrich_item(it, loc, cid, item_components)
             if enriched:
                 items.append(enriched)
 
-    char_equip = (resp.get("characterEquipment") or {}).get("data", {})
-    for char_id, block in char_equip.items():
-        for it in block.get("items", []):
-            enriched = _enrich_item(it, "equipped", char_id, item_components)
-            if enriched:
-                items.append(enriched)
+    manifest.clear_definition_cache()
+    gc.collect()
 
     # Attach wishlist / god-roll scores to weapons (voltron.txt etc.).
     try:
@@ -457,7 +462,6 @@ def normalize_profile(resp: dict) -> dict:
                 continue
             info = wl.score(item.get("itemHash"), item.get("perks") or [])
             item["wishlist"] = info
-            # Sort key used by inventory UI: gods first, then near, then power.
             tier_bonus = {"god": 1000, "near": 400, "partial": 100, "none": 0}.get(
                 info.get("tier") or "none", 0
             )
