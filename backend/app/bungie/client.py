@@ -22,7 +22,7 @@ class BungieError(Exception):
 def _client() -> httpx.AsyncClient:
     global _http_client
     if _http_client is None or _http_client.is_closed:
-        _http_client = httpx.AsyncClient(timeout=60, http2=False)
+        _http_client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=30.0), http2=False)
     return _http_client
 
 
@@ -79,7 +79,7 @@ async def post(path: str, *, json: Optional[dict] = None, authed: bool = True) -
 async def get_raw(url: str) -> bytes:
     """Fetch a raw asset (e.g. a manifest content file) from bungie.net."""
     full = url if url.startswith("http") else f"{BUNGIE_ROOT}{url}"
-    resp = await _client().get(full, timeout=180)
+    resp = await _client().get(full, timeout=httpx.Timeout(300.0, connect=30.0))
     if resp.status_code >= 400:
         raise BungieError(f"Failed to fetch {full}: {resp.status_code}", resp.status_code)
     return resp.content

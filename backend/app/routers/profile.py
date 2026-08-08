@@ -11,12 +11,18 @@ router = APIRouter(prefix="/api", tags=["profile"])
 
 @router.post("/manifest/sync")
 async def sync_manifest(force: bool = False) -> dict:
+    """Start a background manifest sync (returns immediately; poll /manifest/sync/status)."""
     try:
-        return await manifest.sync_manifest(force=force)
+        return await manifest.start_sync_manifest(force=force)
     except client.BungieError as exc:
         raise HTTPException(exc.status_code, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 — surface real sync failures to the UI
         raise HTTPException(500, f"Manifest sync failed: {exc}") from exc
+
+
+@router.get("/manifest/sync/status")
+async def sync_manifest_status() -> dict:
+    return manifest.sync_status()
 
 
 @router.get("/manifest/status")

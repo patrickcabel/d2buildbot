@@ -11,6 +11,7 @@ export default function App() {
   const [auth, setAuth] = useState<AuthStatus | null>(null);
   const [manifestVersion, setManifestVersion] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [syncProgress, setSyncProgress] = useState<string | null>(null);
 
   async function refresh() {
     const [authRes, manRes] = await Promise.allSettled([
@@ -28,11 +29,28 @@ export default function App() {
 
   async function sync() {
     setSyncing(true);
+    setSyncProgress("Starting…");
     try {
-      const res = await api.syncManifest(false);
+      let res = await api.syncManifest(false);
+      while (res.status === "running") {
+        setSyncProgress(
+          res.progress ||
+            (res.table
+              ? `${res.tableIndex}/${res.tableCount} ${res.table}`
+              : "Syncing…")
+        );
+        await new Promise((r) => setTimeout(r, 1500));
+        res = await api.manifestSyncStatus();
+      }
+      if (res.status === "error") {
+        throw new Error(res.error || "Unknown sync error");
+      }
       setManifestVersion(res.version);
+      setSyncProgress(null);
     } catch (e) {
-      alert("Manifest sync failed: " + (e as Error).message);
+      const msg = (e as Error).message || "Request failed (timeout or out of memory on free host)";
+      alert("Manifest sync failed: " + msg);
+      setSyncProgress(null);
     } finally {
       setSyncing(false);
     }
@@ -69,7 +87,11 @@ export default function App() {
               className="px-2.5 py-1 rounded bg-white/10 hover:bg-white/20 disabled:opacity-50"
               title={manifestVersion ? `Manifest: ${manifestVersion}` : "Manifest not synced"}
             >
-              {syncing ? "Syncing…" : manifestVersion ? "Manifest ✓" : "Sync Manifest"}
+              {syncing
+                ? syncProgress || "Syncing…"
+                : manifestVersion
+                  ? "Manifest ✓"
+                  : "Sync Manifest"}
             </button>
             {auth?.authenticated ? (
               <button

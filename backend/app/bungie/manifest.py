@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+import time
 from typing import Any, Optional
 
 from ..db import db
@@ -25,6 +27,18 @@ ITEM_TYPE_WEAPON = 3
 ITEM_TYPE_SUBCLASS = 16
 ITEM_TYPE_MOD = 19
 
+# Background sync status (Render free tier kills long HTTP requests / OOMs easy).
+_sync_state: dict[str, Any] = {
+    "status": "idle",  # idle | running | synced | up-to-date | error
+    "version": None,
+    "progress": "",
+    "error": None,
+    "table": None,
+    "tableIndex": 0,
+    "tableCount": len(NEEDED_TABLES),
+}
+_sync_task: Optional[asyncio.Task] = None
+
 
 def _normalize(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
@@ -38,6 +52,13 @@ def stored_version() -> Optional[str]:
     with db() as conn:
         row = conn.execute("SELECT version FROM manifest_meta WHERE id = 1").fetchone()
     return row["version"] if row else None
+
+
+def sync_status() -> dict:
+    out = dict(_sync_state)
+    if out["status"] in ("idle", "error") and out.get("version") is None:
+        out["version"] = stored_version()
+    return out
 
 
 def _classify(item: dict) -> Optional[str]:
@@ -101,59 +122,161 @@ def _prepare_table(table: str, data: dict) -> tuple[list[tuple], list[tuple]]:
     return rows, name_rows
 
 
-async def sync_manifest(force: bool = False) -> dict:
-    """Download and cache needed definition tables if the version changed."""
-    import asyncio
-    import time
+def _write_table(table: str, rows: list[tuple], name_rows: list[tuple], *, wipe: bool) -> None:
+    with db() as conn:
+        if wipe:
+            conn.execute("DELETE FROM manifest_defs")
+            conn.execute("DELETE FROM name_index")
+        else:
+            conn.execute("DELETE FROM manifest_defs WHERE table_name = ?", (table,))
+        if rows:
+            conn.executemany(
+                "INSERT OR REPLACE INTO manifest_defs (table_name, hash, json) "
+                "VALUES (?, ?, ?)",
+                rows,
+            )
+        if name_rows:
+            conn.executemany(
+                "INSERT OR REPLACE INTO name_index "
+                "(hash, name, normalized, entity_type, is_exotic, class_type) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                name_rows,
+            )
 
-    meta = await get_manifest_meta()
-    version = meta["version"]
-    if not force and stored_version() == version and not _missing_tables():
-        return {"status": "up-to-date", "version": version}
 
-    paths = meta["jsonWorldComponentContentPaths"]["en"]
+def _set_version(version: str) -> None:
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO manifest_meta (id, version, updated_at) VALUES (1, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET version=excluded.version, updated_at=excluded.updated_at",
+            (version, time.time()),
+        )
 
-    # Download + parse outside any DB lock so inventory/auth requests aren't blocked
-    # for minutes (holding the lock during network I/O was wedging the server).
-    # Parse/serialize in a worker thread so the event loop stays responsive.
-    prepared: list[tuple[str, list[tuple], list[tuple]]] = []
-    for table in NEEDED_TABLES:
+
+async def _sync_tables(version: str, paths: dict, tables: list[str], *, full: bool) -> None:
+    """Download + write one table at a time to limit peak RAM on free hosts."""
+    for i, table in enumerate(tables):
+        _sync_state.update(
+            {
+                "progress": f"Downloading {table}…",
+                "table": table,
+                "tableIndex": i + 1,
+                "tableCount": len(tables),
+            }
+        )
         rel = paths.get(table)
         if not rel:
             continue
         content = await client.get_raw(rel)
+        _sync_state["progress"] = f"Parsing {table}…"
         data = await asyncio.to_thread(json.loads, content)
+        del content
         rows, name_rows = await asyncio.to_thread(_prepare_table, table, data)
-        prepared.append((table, rows, name_rows))
-        del data  # free large dict before next table
+        del data
+        _sync_state["progress"] = f"Writing {table} ({len(rows)} defs)…"
+        wipe = full and i == 0
+        await asyncio.to_thread(_write_table, table, rows, name_rows, wipe=wipe)
+        del rows, name_rows
+        import gc
 
-    def _write_db() -> None:
-        with db() as conn:
-            conn.execute("DELETE FROM manifest_defs")
-            conn.execute("DELETE FROM name_index")
-            for _table, rows, name_rows in prepared:
-                if rows:
-                    conn.executemany(
-                        "INSERT OR REPLACE INTO manifest_defs (table_name, hash, json) "
-                        "VALUES (?, ?, ?)",
-                        rows,
-                    )
-                if name_rows:
-                    conn.executemany(
-                        "INSERT OR REPLACE INTO name_index "
-                        "(hash, name, normalized, entity_type, is_exotic, class_type) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
-                        name_rows,
-                    )
-            conn.execute(
-                "INSERT INTO manifest_meta (id, version, updated_at) VALUES (1, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET version=excluded.version, updated_at=excluded.updated_at",
-                (version, time.time()),
-            )
+        gc.collect()
 
-    await asyncio.to_thread(_write_db)
+    await asyncio.to_thread(_set_version, version)
     clear_definition_cache()
-    return {"status": "synced", "version": version}
+
+
+async def _run_sync(force: bool) -> None:
+    try:
+        _sync_state.update(
+            {
+                "status": "running",
+                "progress": "Checking manifest version…",
+                "error": None,
+                "table": None,
+            }
+        )
+        meta = await get_manifest_meta()
+        version = meta["version"]
+        missing = _missing_tables()
+        if not force and stored_version() == version and not missing:
+            _sync_state.update(
+                {
+                    "status": "up-to-date",
+                    "version": version,
+                    "progress": "Already up to date",
+                    "error": None,
+                }
+            )
+            return
+
+        paths = meta["jsonWorldComponentContentPaths"]["en"]
+        full = force or stored_version() != version
+        tables = list(NEEDED_TABLES) if full else missing
+        await _sync_tables(version, paths, tables, full=full)
+        _sync_state.update(
+            {
+                "status": "synced",
+                "version": version,
+                "progress": "Done",
+                "error": None,
+                "table": None,
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        _sync_state.update(
+            {
+                "status": "error",
+                "progress": "Failed",
+                "error": str(exc) or exc.__class__.__name__,
+            }
+        )
+
+
+async def start_sync_manifest(force: bool = False) -> dict:
+    """Kick off a background sync and return immediately (avoids proxy timeouts)."""
+    global _sync_task
+    if _sync_task is not None and not _sync_task.done():
+        return sync_status()
+
+    # Fast path: already current — answer without a background task.
+    try:
+        meta = await get_manifest_meta()
+        version = meta["version"]
+        if not force and stored_version() == version and not _missing_tables():
+            _sync_state.update(
+                {
+                    "status": "up-to-date",
+                    "version": version,
+                    "progress": "Already up to date",
+                    "error": None,
+                }
+            )
+            return sync_status()
+    except Exception:  # noqa: BLE001 — fall through to background (will surface error)
+        pass
+
+    _sync_state.update(
+        {
+            "status": "running",
+            "progress": "Starting…",
+            "error": None,
+            "version": stored_version(),
+        }
+    )
+    _sync_task = asyncio.create_task(_run_sync(force))
+    return sync_status()
+
+
+async def sync_manifest(force: bool = False) -> dict:
+    """Compatibility wrapper: start background sync and wait until finished."""
+    await start_sync_manifest(force=force)
+    while True:
+        st = sync_status()
+        if st["status"] in ("synced", "up-to-date", "error", "idle"):
+            if st["status"] == "error":
+                raise RuntimeError(st.get("error") or "Manifest sync failed")
+            return {"status": st["status"], "version": st.get("version")}
+        await asyncio.sleep(0.5)
 
 
 # Process-level definition cache — avoid opening SQLite + json.loads per hash

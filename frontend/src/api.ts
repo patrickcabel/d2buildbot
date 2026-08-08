@@ -29,7 +29,7 @@ async function req<T>(path: string, options?: RequestInit): Promise<T> {
     } catch {
       /* ignore */
     }
-    throw new Error(detail);
+    throw new Error(detail || `HTTP ${resp.status}`);
   }
   return resp.json();
 }
@@ -362,9 +362,25 @@ export const api = {
   logout: () => req("/api/auth/logout", { method: "POST" }),
   manifestStatus: () => req<{ version: string | null }>("/api/manifest/status"),
   syncManifest: (force = false) =>
-    req<{ status: string; version: string }>(`/api/manifest/sync?force=${force}`, {
-      method: "POST",
-    }),
+    req<{
+      status: string;
+      version: string | null;
+      progress?: string;
+      error?: string | null;
+      table?: string | null;
+      tableIndex?: number;
+      tableCount?: number;
+    }>(`/api/manifest/sync?force=${force}`, { method: "POST" }),
+  manifestSyncStatus: () =>
+    req<{
+      status: string;
+      version: string | null;
+      progress?: string;
+      error?: string | null;
+      table?: string | null;
+      tableIndex?: number;
+      tableCount?: number;
+    }>("/api/manifest/sync/status"),
   profile: () => req<Profile>("/api/profile"),
   characters: () => req<{ characters: Character[] }>("/api/profile/characters"),
   armorDupes: () => req<ArmorDupeScan>("/api/profile/armor-dupes"),
