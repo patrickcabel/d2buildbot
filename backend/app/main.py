@@ -65,6 +65,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from .session import session_middleware  # noqa: E402
+
+app.middleware("http")(session_middleware)
+
 app.include_router(auth.router)
 app.include_router(profile.router)
 app.include_router(references.router)

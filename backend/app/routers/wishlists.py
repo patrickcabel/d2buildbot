@@ -32,7 +32,7 @@ async def download_voltron() -> dict:
     target = wishlist.WISHLIST_DIR / "voltron.txt"
     target.write_text(content, encoding="utf-8")
     stats = wishlist.reload_wishlist()
-    profile_svc.invalidate_profile_cache()
+    profile_svc.invalidate_all_profile_caches()
     return {
         "ok": True,
         "bytes": len(content.encode("utf-8")),
@@ -44,5 +44,5 @@ async def download_voltron() -> dict:
 @router.post("/reload")
 async def reload() -> dict:
     wishlist.reload_wishlist()
-    profile_svc.invalidate_profile_cache()
+    profile_svc.invalidate_all_profile_caches()
     return wishlist.wishlist_stats()

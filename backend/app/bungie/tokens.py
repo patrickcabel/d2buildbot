@@ -8,10 +8,12 @@ from cryptography.fernet import Fernet
 
 from ..config import get_settings
 from ..db import db
+from ..session import get_session_id
 
 
 @dataclass
 class StoredToken:
+    session_id: str
     membership_id: Optional[str]
     access_token: str
     refresh_token: Optional[str]
@@ -36,6 +38,7 @@ def _fernet() -> Fernet:
 
 def save_token(
     *,
+    session_id: str,
     access_token: str,
     refresh_token: Optional[str],
     expires_in: float,
@@ -49,10 +52,10 @@ def save_token(
     with db() as conn:
         conn.execute(
             """
-            INSERT INTO tokens (id, membership_id, access_token, refresh_token,
+            INSERT INTO tokens (session_id, membership_id, access_token, refresh_token,
                                 expires_at, refresh_expires_at, updated_at)
-            VALUES (1, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
                 membership_id=excluded.membership_id,
                 access_token=excluded.access_token,
                 refresh_token=excluded.refresh_token,
@@ -61,6 +64,7 @@ def save_token(
                 updated_at=excluded.updated_at
             """,
             (
+                session_id,
                 membership_id,
                 enc_access,
                 enc_refresh,
@@ -71,13 +75,17 @@ def save_token(
         )
 
 
-def load_token() -> Optional[StoredToken]:
+def load_token(session_id: Optional[str] = None) -> Optional[StoredToken]:
+    sid = session_id or get_session_id()
+    if not sid:
+        return None
     with db() as conn:
-        row = conn.execute("SELECT * FROM tokens WHERE id = 1").fetchone()
+        row = conn.execute("SELECT * FROM tokens WHERE session_id = ?", (sid,)).fetchone()
     if row is None:
         return None
     f = _fernet()
     return StoredToken(
+        session_id=row["session_id"],
         membership_id=row["membership_id"],
         access_token=f.decrypt(row["access_token"].encode()).decode(),
         refresh_token=f.decrypt(row["refresh_token"].encode()).decode()
@@ -88,6 +96,9 @@ def load_token() -> Optional[StoredToken]:
     )
 
 
-def clear_token() -> None:
+def clear_token(session_id: Optional[str] = None) -> None:
+    sid = session_id or get_session_id()
+    if not sid:
+        return
     with db() as conn:
-        conn.execute("DELETE FROM tokens WHERE id = 1")
+        conn.execute("DELETE FROM tokens WHERE session_id = ?", (sid,))

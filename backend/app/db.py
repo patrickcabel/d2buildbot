@@ -33,7 +33,7 @@ def init_db() -> None:
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS tokens (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
+                session_id TEXT PRIMARY KEY,
                 membership_id TEXT,
                 access_token TEXT NOT NULL,
                 refresh_token TEXT,
@@ -99,3 +99,37 @@ def init_db() -> None:
                 ON reference_facts (reference_id);
             """
         )
+        # Migrate legacy single-row tokens (id=1) → per-session tokens.
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tokens)").fetchall()}
+        if "id" in cols and "session_id" not in cols:
+            conn.executescript(
+                """
+                ALTER TABLE tokens RENAME TO tokens_legacy_single;
+                CREATE TABLE tokens (
+                    session_id TEXT PRIMARY KEY,
+                    membership_id TEXT,
+                    access_token TEXT NOT NULL,
+                    refresh_token TEXT,
+                    expires_at REAL NOT NULL,
+                    refresh_expires_at REAL,
+                    updated_at REAL NOT NULL
+                );
+                DROP TABLE tokens_legacy_single;
+                """
+            )
+        elif "session_id" not in cols:
+            # Empty/unknown schema — recreate.
+            conn.execute("DROP TABLE IF EXISTS tokens")
+            conn.execute(
+                """
+                CREATE TABLE tokens (
+                    session_id TEXT PRIMARY KEY,
+                    membership_id TEXT,
+                    access_token TEXT NOT NULL,
+                    refresh_token TEXT,
+                    expires_at REAL NOT NULL,
+                    refresh_expires_at REAL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )

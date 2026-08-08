@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from ..session import get_session_id
 from . import client, manifest
 
 # GetProfile components (numeric).
@@ -42,15 +43,21 @@ CLASS_TYPES = {0: "titan", 1: "hunter", 2: "warlock", 3: "unknown"}
 TIER_TYPES = {0: "unknown", 2: "basic", 3: "common", 4: "rare", 5: "legendary", 6: "exotic"}
 
 
-_membership_cache: Optional[dict] = None
+_membership_cache: dict[str, dict] = {}
+
+
+def _cache_key() -> Optional[str]:
+    return get_session_id()
 
 
 async def get_membership(force: bool = False) -> dict:
-    """Return the resolved primary membership, cached in memory."""
-    global _membership_cache
-    if _membership_cache is None or force:
-        _membership_cache = await resolve_membership()
-    return _membership_cache
+    """Return the resolved primary membership for the current session."""
+    key = _cache_key()
+    if not key:
+        raise client.BungieError("Not authenticated with Bungie.", status_code=401)
+    if force or key not in _membership_cache:
+        _membership_cache[key] = await resolve_membership()
+    return _membership_cache[key]
 
 
 async def resolve_membership() -> dict:
@@ -79,29 +86,28 @@ async def get_profile_raw() -> tuple[dict, dict]:
 
 
 # Short-lived cache so inventory / caps / solve / dupes share one Bungie+normalize pass.
-# (ts, membership, normalized, raw)
-_profile_cache: Optional[tuple[float, dict, dict, dict]] = None
+# session_id -> (ts, membership, normalized, raw)
+_profile_cache: dict[str, tuple[float, dict, dict, dict]] = {}
 _PROFILE_CACHE_TTL = 90.0
 
 
 async def get_profile_bundle_cached(force: bool = False) -> tuple[dict, dict, dict]:
-    """Return (membership, normalized, raw), cached briefly in memory."""
+    """Return (membership, normalized, raw), cached briefly in memory per session."""
     import time
 
-    global _profile_cache
+    key = _cache_key()
+    if not key:
+        raise client.BungieError("Not authenticated with Bungie.", status_code=401)
     now = time.time()
-    if (
-        not force
-        and _profile_cache is not None
-        and now - _profile_cache[0] < _PROFILE_CACHE_TTL
-    ):
-        return _profile_cache[1], _profile_cache[2], _profile_cache[3]
+    cached = _profile_cache.get(key)
+    if not force and cached is not None and now - cached[0] < _PROFILE_CACHE_TTL:
+        return cached[1], cached[2], cached[3]
     membership, resp = await get_profile_raw()
     # Normalize off the event loop — SQLite/JSON work is CPU-bound.
     import asyncio
 
     normalized = await asyncio.to_thread(normalize_profile, resp)
-    _profile_cache = (now, membership, normalized, resp)
+    _profile_cache[key] = (now, membership, normalized, resp)
     return membership, normalized, resp
 
 
@@ -116,25 +122,47 @@ async def get_profile_raw_cached(force: bool = False) -> tuple[dict, dict]:
     return membership, raw
 
 
-def invalidate_profile_cache() -> None:
-    global _profile_cache
-    _profile_cache = None
+def invalidate_profile_cache(session_id: Optional[str] = None) -> None:
+    """Drop profile cache for one session, or all sessions if none specified."""
+    if session_id:
+        _profile_cache.pop(session_id, None)
+        _membership_cache.pop(session_id, None)
+        return
+    key = _cache_key()
+    if key:
+        _profile_cache.pop(key, None)
+        _membership_cache.pop(key, None)
+    else:
+        _profile_cache.clear()
+        _membership_cache.clear()
+
+
+def invalidate_all_profile_caches() -> None:
+    _profile_cache.clear()
+    _membership_cache.clear()
 
 
 def get_cached_membership() -> Optional[dict]:
-    if _profile_cache is None:
+    key = _cache_key()
+    if not key:
         return None
-    return _profile_cache[1]
+    cached = _profile_cache.get(key)
+    if cached is None:
+        return None
+    return cached[1]
 
 
 async def get_characters_fast() -> tuple[dict, list[dict]]:
     """Character list without pulling inventory components when possible."""
     import time
 
-    global _profile_cache
+    key = _cache_key()
+    if not key:
+        raise client.BungieError("Not authenticated with Bungie.", status_code=401)
     now = time.time()
-    if _profile_cache is not None and now - _profile_cache[0] < _PROFILE_CACHE_TTL:
-        return _profile_cache[1], _profile_cache[2].get("characters") or []
+    cached = _profile_cache.get(key)
+    if cached is not None and now - cached[0] < _PROFILE_CACHE_TTL:
+        return cached[1], cached[2].get("characters") or []
 
     membership = await get_membership()
     # 100 Profiles, 200 Characters — enough for class/light/emblem.

@@ -1,10 +1,17 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from fastapi.responses import RedirectResponse
 
 from ..bungie import auth, tokens
+from ..bungie import profile as profile_svc
 from ..config import get_settings
+from ..session import (
+    attach_session_cookie,
+    clear_session_cookie,
+    get_session_id,
+    new_session_id,
+)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -38,14 +45,26 @@ async def callback(code: str = Query(...), state: str = Query(...)) -> RedirectR
     settings = get_settings()
     if not auth.consume_state(state):
         raise HTTPException(400, "Invalid OAuth state.")
+    session_id = new_session_id()
     try:
-        await auth.exchange_code_for_token(code)
+        await auth.exchange_code_for_token(code, session_id=session_id)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(502, f"Token exchange failed: {exc}") from exc
-    return RedirectResponse(f"{settings.resolved_frontend_origin}/?login=success")
+    profile_svc.invalidate_profile_cache(session_id)
+    response = RedirectResponse(f"{settings.resolved_frontend_origin}/?login=success")
+    attach_session_cookie(response, session_id)
+    return response
 
 
 @router.post("/logout")
-async def logout() -> dict:
-    tokens.clear_token()
-    return {"ok": True}
+async def logout() -> Response:
+    sid = get_session_id()
+    tokens.clear_token(sid)
+    if sid:
+        profile_svc.invalidate_profile_cache(sid)
+    response = Response(
+        content='{"ok":true}',
+        media_type="application/json",
+    )
+    clear_session_cookie(response)
+    return response

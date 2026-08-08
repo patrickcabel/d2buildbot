@@ -358,7 +358,7 @@ export interface VaultCleanScan {
 
 export const api = {
   authStatus: () => req<AuthStatus>("/api/auth/status"),
-  loginUrl: () => `${API_ORIGIN}/api/auth/login`,
+  loginUrl: () => (API_ORIGIN ? `${API_ORIGIN}/api/auth/login` : "/api/auth/login"),
   logout: () => req("/api/auth/logout", { method: "POST" }),
   manifestStatus: () => req<{ version: string | null }>("/api/manifest/status"),
   syncManifest: (force = false) =>

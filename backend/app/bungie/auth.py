@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 import httpx
 
 from ..config import get_settings
+from ..session import get_session_id
 from . import tokens
 
 AUTHORIZE_URL = "https://www.bungie.net/en/OAuth/Authorize"
@@ -71,7 +72,7 @@ def _basic_auth_header() -> dict[str, str]:
     return {"Authorization": "Basic " + base64.b64encode(raw).decode()}
 
 
-async def exchange_code_for_token(code: str) -> None:
+async def exchange_code_for_token(code: str, *, session_id: str) -> None:
     settings = get_settings()
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -86,10 +87,10 @@ async def exchange_code_for_token(code: str) -> None:
         resp = await client.post(TOKEN_URL, headers=headers, data=data)
         resp.raise_for_status()
         payload = resp.json()
-    _store_payload(payload)
+    _store_payload(payload, session_id=session_id)
 
 
-async def refresh_access_token(refresh_token: str) -> None:
+async def refresh_access_token(refresh_token: str, *, session_id: str) -> None:
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
         **_basic_auth_header(),
@@ -99,11 +100,12 @@ async def refresh_access_token(refresh_token: str) -> None:
         resp = await client.post(TOKEN_URL, headers=headers, data=data)
         resp.raise_for_status()
         payload = resp.json()
-    _store_payload(payload)
+    _store_payload(payload, session_id=session_id)
 
 
-def _store_payload(payload: dict) -> None:
+def _store_payload(payload: dict, *, session_id: str) -> None:
     tokens.save_token(
+        session_id=session_id,
         access_token=payload["access_token"],
         refresh_token=payload.get("refresh_token"),
         expires_in=payload.get("expires_in", 3600),
@@ -113,14 +115,17 @@ def _store_payload(payload: dict) -> None:
 
 
 async def get_valid_access_token() -> Optional[str]:
-    """Return a usable access token, refreshing if necessary."""
-    token = tokens.load_token()
+    """Return a usable access token for the current browser session."""
+    session_id = get_session_id()
+    if not session_id:
+        return None
+    token = tokens.load_token(session_id)
     if token is None:
         return None
     if not token.is_access_expired:
         return token.access_token
     if token.refresh_token and not token.is_refresh_expired:
-        await refresh_access_token(token.refresh_token)
-        refreshed = tokens.load_token()
+        await refresh_access_token(token.refresh_token, session_id=session_id)
+        refreshed = tokens.load_token(session_id)
         return refreshed.access_token if refreshed else None
     return None

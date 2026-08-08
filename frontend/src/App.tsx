@@ -129,7 +129,8 @@ export default function App() {
         )}
         {auth && auth.configured && !auth.authenticated && (
           <div className="mb-4 p-3 rounded bg-blue-500/10 border border-blue-500/30 text-blue-200 text-sm">
-            Log in with Bungie and sync the manifest to load your inventory.
+            Log in with Bungie to load <em>your</em> inventory. Each browser session is private —
+            other players who log in only see their own vault.
           </div>
         )}
         {tab === "builds" && <Builds authed={!!auth?.authenticated} />}
