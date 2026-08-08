@@ -98,8 +98,11 @@ export default function App() {
       <main className="max-w-[1800px] mx-auto px-4 lg:px-6 py-6">
         {auth && !auth.configured && (
           <div className="mb-4 p-3 rounded bg-yellow-500/10 border border-yellow-500/30 text-yellow-200 text-sm">
-            Bungie API credentials are not configured. Fill in <code>backend/.env</code> and restart
-            the backend.
+            Bungie API credentials are missing. On Render: <strong>Environment</strong> → add{" "}
+            <code>BUNGIE_API_KEY</code>, <code>BUNGIE_CLIENT_ID</code>, and{" "}
+            <code>BUNGIE_CLIENT_SECRET</code> (same values as local <code>backend/.env</code>), then
+            redeploy. Also set your Bungie app Redirect URL to{" "}
+            <code>{window.location.origin}/api/auth/callback</code>.
           </div>
         )}
         {auth && auth.configured && !auth.authenticated && (
